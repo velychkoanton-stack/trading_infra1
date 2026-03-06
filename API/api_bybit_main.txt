@@ -1,0 +1,2 @@
+api_key=Lxy4r5hDMkdWJIv5yy
+api_secret=oWNBYKpUQFsCEeBeFMHvsqIdhG9sTeQNcQ5R
