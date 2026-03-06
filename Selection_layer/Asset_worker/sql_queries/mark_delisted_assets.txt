@@ -1,4 +1,4 @@
-UPDATE Asset_universe
+UPDATE asset_universe
 SET
     exchange_status = 'delisted',
     updated_at = NOW()
