@@ -1,0 +1,6 @@
+UPDATE asset_universe
+SET
+    pipe_status = 'skip_fresh',
+    last_update_ts = NOW(),
+    updated_at = NOW()
+WHERE symbol = %s;

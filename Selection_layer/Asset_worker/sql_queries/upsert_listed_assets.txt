@@ -1,0 +1,19 @@
+INSERT INTO asset_universe
+(
+    symbol,
+    pipe_status,
+    exchange_status,
+    created_at,
+    updated_at
+)
+VALUES
+(
+    %s,
+    'new',
+    'listed',
+    NOW(),
+    NOW()
+)
+ON DUPLICATE KEY UPDATE
+    exchange_status = 'listed',
+    updated_at = NOW();

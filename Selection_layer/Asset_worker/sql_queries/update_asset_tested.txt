@@ -1,0 +1,11 @@
+UPDATE asset_universe
+SET
+    pipe_status = 'tested',
+    liq_5min_mean = %s,
+    liq_1h_mean = %s,
+    adf = %s,
+    p_value = %s,
+    non_stationary_status = %s,
+    last_update_ts = NOW(),
+    updated_at = NOW()
+WHERE symbol = %s;

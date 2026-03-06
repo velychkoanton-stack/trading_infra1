@@ -1,0 +1,5 @@
+UPDATE Asset_universe
+SET
+    exchange_status = 'delisted',
+    updated_at = NOW()
+WHERE symbol NOT IN ({listed_symbols_placeholders});
