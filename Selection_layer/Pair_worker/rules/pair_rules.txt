@@ -22,12 +22,12 @@ MIN_LIQ_1H=12000
 MAX_ASSET_PRESENCE=0.05
 
 # Asset-side ADF filters from asset_universe
-ASSET_MAX_ADF=NONE
-ASSET_MAX_PVALUE=NONE
+ASSET_MAX_ADF=-2.9
+ASSET_MAX_PVALUE=0.05
 
 # Current project logic:
 # acceptable assets are selected with non_stationary_status = 0
-ASSET_REQUIRE_NON_STATIONARY_STATUS=0
+ASSET_REQUIRE_NON_STATIONARY_STATUS=NONE
 
 # =========================================
 # Parquet / data refresh rules
