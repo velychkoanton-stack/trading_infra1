@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import hashlib
+
 import itertools
 import time
 from pathlib import Path
@@ -51,12 +51,20 @@ def parse_optional_int(value: str | None) -> int | None:
 
 def build_pair_uuid(asset_1: str, asset_2: str) -> str:
     """
-    Deterministic pair UUID from ordered asset names.
+    Build readable deterministic pair key from ordered asset symbols.
 
-    We store a stable SHA1 hash because raw symbols may exceed practical UUID length.
+    Examples:
+    AAVE/USDT:USDT + ADA/USDT:USDT -> AAVE_ADA
+    BTC/USDT:USDT + ETH/USDT:USDT -> BTC_ETH
     """
-    pair_key = f"{asset_1}|{asset_2}"
-    return hashlib.sha1(pair_key.encode("utf-8")).hexdigest()
+    def base_symbol(symbol: str) -> str:
+        return symbol.split("/")[0].strip().upper()
+
+    base_1 = base_symbol(asset_1)
+    base_2 = base_symbol(asset_2)
+
+    ordered = sorted([base_1, base_2])
+    return f"{ordered[0]}_{ordered[1]}"
 
 
 def safe_sleep(seconds: float) -> None:
@@ -592,7 +600,7 @@ class PairWorker:
         available_symbols = sorted(asset_data.keys())
 
         if len(available_symbols) < 2:
-            self.logger.info("Insufficient parquet-ready assets | count=%s", len(available_symbols)))
+            self.logger.info("Insufficient parquet-ready assets | count=%s", len(available_symbols))
             cleanup_objects(asset_data, asset_pool, grid_df)
             force_gc()
             safe_sleep(float(self.rules["PAIR_LOOP_SLEEP_SEC"]))
