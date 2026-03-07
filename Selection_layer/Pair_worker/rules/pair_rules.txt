@@ -1,0 +1,114 @@
+# =========================================
+# Pair worker loop / execution
+# =========================================
+TIMEFRAME=5m
+TARGET_CANDLES=10000
+ASSET_POOL_SIZE=20
+PAIR_BATCH_INSERT_SIZE=500
+STAT_BATCH_SIZE=20
+BT_BATCH_SIZE=20
+
+# No sleep for now: worker immediately starts next loop
+PAIR_LOOP_SLEEP_SEC=0
+
+# Re-read rules each loop
+STAT_VALIDITY_DAYS=60
+
+# =========================================
+# Asset selection rules
+# =========================================
+MIN_LIQ_5M=1000
+MIN_LIQ_1H=12000
+MAX_ASSET_PRESENCE=0.05
+
+# Asset-side ADF filters from asset_universe
+ASSET_MAX_ADF=NONE
+ASSET_MAX_PVALUE=NONE
+
+# Current project logic:
+# acceptable assets are selected with non_stationary_status = 0
+ASSET_REQUIRE_NON_STATIONARY_STATUS=0
+
+# =========================================
+# Parquet / data refresh rules
+# =========================================
+ALLOW_PARQUET_REFRESH=true
+
+# If parquet last timestamp is older than this many seconds from NOW(),
+# refresh parquet by loading TARGET_CANDLES and dropping duplicates
+PARQUET_MAX_AGE_SEC=900
+
+# =========================================
+# Pair creation defaults
+# =========================================
+DEFAULT_NEW_PAIR_STATUS=forbidden
+DEFAULT_NEW_PAIR_STAT_STATE=new
+
+# bt_state is assigned after stat test passes
+DEFAULT_NEW_PAIR_BT_STATE=NONE
+
+# =========================================
+# Stat test thresholds
+# Keep all fields separate.
+# Unknown / not decided yet => NONE
+# =========================================
+STAT_MIN_ADF=-2.9
+STAT_MAX_PVALUE=0.05
+STAT_MAX_HURST=0.45
+STAT_MIN_HL=NONE
+STAT_MAX_HL=NONE
+STAT_MIN_SPREAD_SKEW=NONE
+STAT_MAX_SPREAD_SKEW=NONE
+STAT_MIN_SPREAD_KURT=NONE
+STAT_MAX_SPREAD_KURT=NONE
+STAT_MIN_BETA=NONE
+STAT_MAX_BETA=NONE
+STAT_MIN_BETA_NORM=NONE
+STAT_MAX_BETA_NORM=NONE
+
+# Composite score threshold not final yet
+MIN_STAT_TEST_SCORE=NONE
+
+# =========================================
+# Backtest rules
+# =========================================
+BACKTEST_GRID_FILE=backtest_grid.csv
+BACKTEST_START_BALANCE=1000
+MIN_POSITIVE_GRID_SHARE=0.50
+MIN_TRADES=5
+
+# Backtest score threshold not final yet
+MIN_BACKTEST_SCORE=NONE
+
+# =========================================
+# Backtest plateau / robustness
+# Unknown for now => NONE
+# =========================================
+PLATEAU_SELECTION_MODE=NONE
+PLATEAU_MIN_NEIGHBORS=NONE
+PLATEAU_MIN_CLUSTER_SIZE=NONE
+
+# =========================================
+# Pair status transition thresholds
+# Unknown for now => NONE
+# =========================================
+CANDIDATE_MIN_STAT_SCORE=NONE
+CANDIDATE_MIN_BACKTEST_SCORE=NONE
+FORBIDDEN_MAX_STAT_SCORE=NONE
+FORBIDDEN_MAX_BACKTEST_SCORE=NONE
+
+# =========================================
+# Retry / fail behavior
+# =========================================
+ALLOW_STAT_RETRY=true
+ALLOW_BT_RETRY=true
+STAT_RETRY_COOLDOWN_HOURS=24
+BT_RETRY_COOLDOWN_HOURS=24
+
+# =========================================
+# Paths / API files
+# =========================================
+BYBIT_API_FILE=api_bybit_main.txt
+MYSQL_API_FILE=api_mysql_main.txt
+LOG_FILE=data/logs/pair_worker.log
+BACKTEST_OUTPUT_DIR=data/backtest
