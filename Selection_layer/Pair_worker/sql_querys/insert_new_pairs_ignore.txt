@@ -1,0 +1,26 @@
+INSERT IGNORE INTO pair_universe
+(
+    uuid,
+    asset_1,
+    asset_2,
+    liq_5min_mean,
+    liq_1h_mean,
+    status,
+    dt_status_change,
+    activity_score,
+    stat_state,
+    bt_state
+)
+VALUES
+(
+    %s,
+    %s,
+    %s,
+    %s,
+    %s,
+    'forbidden',
+    NOW(),
+    %s,
+    'new',
+    'pending'
+);

@@ -1,0 +1,42 @@
+SELECT
+    a.id,
+    a.symbol,
+    a.liq_5min_mean,
+    a.liq_1h_mean,
+    a.adf,
+    a.p_value,
+    a.non_stationary_status,
+    COALESCE(ap.asset_pair_count, 0) AS asset_pair_count,
+    tp.total_pair_count,
+    CASE
+        WHEN tp.total_pair_count = 0 THEN 0
+        ELSE COALESCE(ap.asset_pair_count, 0) / tp.total_pair_count
+    END AS asset_presence
+FROM asset_universe AS a
+LEFT JOIN (
+    SELECT
+        pair_symbol.symbol,
+        COUNT(*) AS asset_pair_count
+    FROM (
+        SELECT asset_1 AS symbol FROM pair_universe
+        UNION ALL
+        SELECT asset_2 AS symbol FROM pair_universe
+    ) AS pair_symbol
+    GROUP BY pair_symbol.symbol
+) AS ap
+    ON a.symbol = ap.symbol
+CROSS JOIN (
+    SELECT COUNT(*) AS total_pair_count
+    FROM pair_universe
+) AS tp
+WHERE a.pipe_status = 'tested'
+  AND a.exchange_status = 'listed'
+  AND a.non_stationary_status = {asset_require_non_stationary_status}
+  AND a.liq_5min_mean >= {min_liq_5m}
+  AND a.liq_1h_mean >= {min_liq_1h}
+  {asset_adf_filter_sql}
+  {asset_pvalue_filter_sql}
+ORDER BY
+    a.liq_1h_mean DESC,
+    a.symbol ASC
+LIMIT {asset_pool_size};

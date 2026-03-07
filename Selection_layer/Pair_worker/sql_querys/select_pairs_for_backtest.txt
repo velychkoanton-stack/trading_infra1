@@ -1,0 +1,39 @@
+SELECT
+    id,
+    uuid,
+    asset_1,
+    asset_2,
+    liq_5min_mean,
+    liq_1h_mean,
+    status,
+    beta,
+    beta_norm,
+    adf,
+    p_value,
+    hurst,
+    hl,
+    spread_skew,
+    spread_kurt,
+    stat_test_score,
+    stat_state,
+    bt_state,
+    dt_backtest_tested
+FROM pair_universe
+WHERE asset_1 IN ({asset_pool_placeholders})
+  AND asset_2 IN ({asset_pool_placeholders})
+  AND stat_state = 'done'
+  AND (
+        bt_state = 'pending'
+        OR (
+            bt_state = 'fail'
+            AND {allow_bt_retry} = 1
+            AND (
+                dt_backtest_tested IS NULL
+                OR dt_backtest_tested < NOW() - INTERVAL {bt_retry_cooldown_hours} HOUR
+            )
+        )
+      )
+ORDER BY
+    dt_backtest_tested ASC,
+    id ASC
+LIMIT {bt_batch_size};

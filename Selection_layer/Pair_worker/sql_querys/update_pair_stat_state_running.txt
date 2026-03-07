@@ -1,0 +1,4 @@
+UPDATE pair_universe
+SET
+    stat_state = 'running'
+WHERE id = %s;

@@ -1,0 +1,7 @@
+UPDATE pair_universe
+SET
+    dt_backtest_tested = NOW(),
+    bt_state = 'fail',
+    status = %s,
+    dt_status_change = NOW()
+WHERE id = %s;

@@ -1,0 +1,15 @@
+UPDATE pair_universe
+SET
+    adf = %s,
+    p_value = %s,
+    hurst = %s,
+    hl = %s,
+    spread_skew = %s,
+    spread_kurt = %s,
+    beta = %s,
+    beta_norm = %s,
+    dt_stat_tested = NOW(),
+    stat_test_score = %s,
+    stat_state = %s,
+    bt_state = %s
+WHERE id = %s;

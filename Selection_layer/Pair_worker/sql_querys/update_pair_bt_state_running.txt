@@ -1,0 +1,4 @@
+UPDATE pair_universe
+SET
+    bt_state = 'running'
+WHERE id = %s;

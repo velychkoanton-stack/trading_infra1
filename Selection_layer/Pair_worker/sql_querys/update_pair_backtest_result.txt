@@ -1,0 +1,17 @@
+UPDATE pair_universe
+SET
+    bt_final_equity = %s,
+    win_rate = %s,
+    risk_reward_ratio = %s,
+    num_trades = %s,
+    exit_mean_reverted = %s,
+    exit_hl_coint_lst = %s,
+    best_tp = %s,
+    best_sl = %s,
+    best_beta = %s,
+    dt_backtest_tested = NOW(),
+    backtest_score = %s,
+    bt_state = %s,
+    status = %s,
+    dt_status_change = NOW()
+WHERE id = %s;
