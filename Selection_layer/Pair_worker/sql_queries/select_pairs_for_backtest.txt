@@ -22,17 +22,7 @@ FROM pair_universe
 WHERE asset_1 IN ({asset_pool_placeholders})
   AND asset_2 IN ({asset_pool_placeholders})
   AND stat_state = 'done'
-  AND (
-        bt_state = 'pending'
-        OR (
-            bt_state = 'fail'
-            AND {allow_bt_retry} = 1
-            AND (
-                dt_backtest_tested IS NULL
-                OR dt_backtest_tested < NOW() - INTERVAL {bt_retry_cooldown_hours} HOUR
-            )
-        )
-      )
+  AND bt_state = 'pending'
 ORDER BY
     dt_backtest_tested ASC,
     id ASC
