@@ -592,7 +592,7 @@ class PairWorker:
         available_symbols = sorted(asset_data.keys())
 
         if len(available_symbols) < 2:
-            self.logger.info("Insufficient parquet-ready assets | count=%s", len(available_symbols)))
+            self.logger.info("Insufficient parquet-ready assets | count=%s", len(available_symbols))
             cleanup_objects(asset_data, asset_pool, grid_df)
             force_gc()
             safe_sleep(float(self.rules["PAIR_LOOP_SLEEP_SEC"]))
