@@ -3,10 +3,10 @@
 # =========================================
 TIMEFRAME=5m
 TARGET_CANDLES=10000
-ASSET_POOL_SIZE=20
+ASSET_POOL_SIZE=50
 PAIR_BATCH_INSERT_SIZE=500
-STAT_BATCH_SIZE=20
-BT_BATCH_SIZE=20
+STAT_BATCH_SIZE=50
+BT_BATCH_SIZE=50
 
 # No sleep for now: worker immediately starts next loop
 PAIR_LOOP_SLEEP_SEC=0
