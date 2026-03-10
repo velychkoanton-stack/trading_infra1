@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
 
-from Common.db.db_execute import fetch_all, execute
+from Common.db.db_execute import fetch_all, execute_many
 from Common.db.heartbeat_writer import write_heartbeat
 from Common.exchange.bybit_client import create_bybit_client, fetch_ohlcv_with_retry
 from Common.parquet.parquet_reader import parquet_exists, read_symbol_ohlcv_parquet
@@ -53,6 +54,7 @@ class SignalWorker:
         self.full_refresh_if_rows_below = int(self.rules.get("full_refresh_if_rows_below", "1000"))
         self.incremental_fetch_limit = int(self.rules.get("incremental_fetch_limit", "20"))
         self.scheduler_sleep_check_sec = int(self.rules.get("scheduler_sleep_check_sec", "30"))
+        self.symbol_refresh_workers = int(self.rules.get("symbol_refresh_workers", "8"))
 
         self.get_active_pairs_sql = load_sql_file(self.sql_dir / "get_active_pairs.txt")
         self.get_scheduler_statuses_sql = load_sql_file(self.sql_dir / "get_scheduler_statuses.txt")
@@ -62,10 +64,11 @@ class SignalWorker:
 
     def run_forever(self) -> None:
         self.logger.info(
-            "Signal worker started | timeframe=%s | lookback=%s | threshold=%.3f",
+            "Signal worker started | timeframe=%s | lookback=%s | threshold=%.3f | symbol_workers=%s",
             self.timeframe,
             self.lookback_candles,
             self.entry_abs_z_threshold,
+            self.symbol_refresh_workers,
         )
 
         while True:
@@ -109,49 +112,107 @@ class SignalWorker:
                 force_gc()
 
     def run_once(self) -> None:
-        active_pairs = self._fetch_active_pairs()
-        self.logger.info("Fetched pairs from signal_table | count=%s", len(active_pairs))
+        pair_rows = self._fetch_active_pairs()
+        self.logger.info("Fetched pairs from signal_table | count=%s", len(pair_rows))
 
-        updated_rows = 0
+        if not pair_rows:
+            return
+
+        symbol_cache = self._build_symbol_cache(pair_rows)
+
+        update_params_list: list[dict[str, Any]] = []
         signal_hits = 0
+        failed_pairs = 0
 
-        for pair_row in active_pairs:
+        for pair_row in pair_rows:
             uuid = pair_row["uuid"]
 
             try:
-                metrics = self._process_pair(pair_row)
-                execute(
-                    sql=self.update_signal_metrics_sql,
-                    api_file_name=self.mysql_api_file,
-                    params=metrics,
-                )
-                updated_rows += 1
-
-                if metrics["_signal_hit"] == 1:
-                    signal_hits += 1
+                metrics = self._process_pair(pair_row, symbol_cache)
+                signal_hits += metrics.pop("_signal_hit", 0)
+                update_params_list.append(metrics)
 
             except Exception:
+                failed_pairs += 1
                 self.logger.exception("Failed processing pair | uuid=%s", uuid)
 
+        updated_rows = 0
+        if update_params_list:
+            updated_rows = execute_many(
+                sql=self.update_signal_metrics_sql,
+                api_file_name=self.mysql_api_file,
+                params_seq=update_params_list,
+            )
+
         self.logger.info(
-            "Signal worker DB update complete | pairs_total=%s | updated_rows=%s | signal_hits=%s",
-            len(active_pairs),
+            "Signal worker DB update complete | pairs_total=%s | updated_rows=%s | signal_hits=%s | failed_pairs=%s",
+            len(pair_rows),
             updated_rows,
             signal_hits,
+            failed_pairs,
         )
 
-    def _process_pair(self, pair_row: dict[str, Any]) -> dict[str, Any]:
+    def _build_symbol_cache(self, pair_rows: list[dict[str, Any]]) -> dict[str, pd.DataFrame]:
+        unique_symbols = sorted(
+            {row["asset_1"] for row in pair_rows}.union({row["asset_2"] for row in pair_rows})
+        )
+
+        self.logger.info("Building symbol cache | unique_symbols=%s", len(unique_symbols))
+
+        symbol_cache: dict[str, pd.DataFrame] = {}
+        failed_symbols: list[str] = []
+
+        with ThreadPoolExecutor(max_workers=self.symbol_refresh_workers) as executor:
+            future_map = {
+                executor.submit(self._ensure_symbol_dataset, symbol): symbol
+                for symbol in unique_symbols
+            }
+
+            for future in as_completed(future_map):
+                symbol = future_map[future]
+                try:
+                    symbol_cache[symbol] = future.result()
+                except Exception:
+                    failed_symbols.append(symbol)
+                    self.logger.exception("Failed building symbol dataset | symbol=%s", symbol)
+
+        if failed_symbols:
+            self.logger.warning(
+                "Some symbols failed during cache build | failed_count=%s | examples=%s",
+                len(failed_symbols),
+                failed_symbols[:10],
+            )
+
+        self.logger.info(
+            "Symbol cache ready | loaded=%s | failed=%s",
+            len(symbol_cache),
+            len(failed_symbols),
+        )
+
+        return symbol_cache
+
+    def _process_pair(
+        self,
+        pair_row: dict[str, Any],
+        symbol_cache: dict[str, pd.DataFrame],
+    ) -> dict[str, Any]:
         uuid = pair_row["uuid"]
         asset_1 = pair_row["asset_1"]
         asset_2 = pair_row["asset_2"]
+
+        if asset_1 not in symbol_cache:
+            raise ValueError(f"Missing cached OHLCV for asset_1={asset_1}")
+        if asset_2 not in symbol_cache:
+            raise ValueError(f"Missing cached OHLCV for asset_2={asset_2}")
+
         beta_norm = pair_row.get("beta_norm")
         prev_last_z_score = pair_row.get("prev_last_z_score")
         signal_this_month = int(pair_row.get("signal_this_month") or 0)
         signal_prev_month = int(pair_row.get("signal_prev_month") or 0)
         signal_last_update_ts = pair_row.get("signal_last_update_ts")
 
-        df_1 = self._ensure_symbol_dataset(asset_1)
-        df_2 = self._ensure_symbol_dataset(asset_2)
+        df_1 = symbol_cache[asset_1]
+        df_2 = symbol_cache[asset_2]
 
         merged = self._merge_pair_frames(df_1, df_2, asset_1, asset_2)
         if len(merged) < self.lookback_candles:
