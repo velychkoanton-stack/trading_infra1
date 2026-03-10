@@ -1,0 +1,26 @@
+SELECT
+    st.uuid,
+    st.asset_1,
+    st.asset_2,
+    st.tp,
+    st.sl,
+    st.last_z_score AS prev_last_z_score,
+    st.signal_this_month,
+    st.signal_prev_month,
+    st.last_update_ts AS signal_last_update_ts,
+    ps.adf,
+    ps.p_value,
+    ps.beta_norm,
+    ps.level_30,
+    ps.level_180,
+    ps.quarantine_until
+FROM signal_table st
+INNER JOIN pair_state ps
+    ON ps.uuid = st.uuid
+WHERE
+    ps.level_30 <> 'quarantine'
+    AND ps.level_180 <> 'quarantine'
+    AND (ps.quarantine_until IS NULL OR ps.quarantine_until <= NOW(6))
+    AND ps.adf < %(adf_threshold)s
+    AND ps.p_value < %(p_value_threshold)s
+ORDER BY st.uuid;
