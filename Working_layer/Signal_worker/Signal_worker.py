@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import math
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -111,7 +110,7 @@ class SignalWorker:
 
     def run_once(self) -> None:
         active_pairs = self._fetch_active_pairs()
-        self.logger.info("Fetched active pairs | count=%s", len(active_pairs))
+        self.logger.info("Fetched pairs from signal_table | count=%s", len(active_pairs))
 
         updated_rows = 0
         signal_hits = 0
@@ -185,12 +184,13 @@ class SignalWorker:
         )
 
         self.logger.info(
-            "Pair processed | uuid=%s | last_z=%.4f | max_z=%.4f | min_z=%.4f | signal_hit=%s",
+            "Pair processed | uuid=%s | last_z=%.4f | max_z=%.4f | min_z=%.4f | signal_hit=%s | countable=%s",
             uuid,
             z_summary["last_z_score"],
             z_summary["max_z_score"],
             z_summary["min_z_score"],
             signal_hit,
+            countable_signal_source,
         )
 
         return {
@@ -218,7 +218,7 @@ class SignalWorker:
                 limit=self.lookback_candles,
             )
             replace_symbol_ohlcv_parquet(symbol, rows)
-            return read_symbol_ohlcv_parquet(symbol)
+            return self._normalize_ohlcv_frame(read_symbol_ohlcv_parquet(symbol))
 
         df = read_symbol_ohlcv_parquet(symbol).copy()
         df = self._normalize_ohlcv_frame(df)
@@ -255,10 +255,6 @@ class SignalWorker:
         return fetch_all(
             sql=self.get_active_pairs_sql,
             api_file_name=self.mysql_api_file,
-            params={
-                "adf_threshold": self.adf_threshold,
-                "p_value_threshold": self.p_value_threshold,
-            },
         )
 
     def _get_effective_control_status(self) -> tuple[str, str]:
@@ -383,6 +379,34 @@ class SignalWorker:
         last_1h = float(clean.tail(12).sum())
         return last_5m, last_1h
 
+    def _pair_is_countable_signal_source(self, pair_row: dict[str, Any]) -> bool:
+        adf = pair_row.get("adf")
+        p_value = pair_row.get("p_value")
+        level_30 = pair_row.get("level_30")
+        level_180 = pair_row.get("level_180")
+        quarantine_until = pair_row.get("quarantine_until")
+
+        if adf is None or p_value is None:
+            return False
+
+        if float(adf) >= self.adf_threshold:
+            return False
+
+        if float(p_value) >= self.p_value_threshold:
+            return False
+
+        if str(level_30 or "").lower() == "quarantine":
+            return False
+
+        if str(level_180 or "").lower() == "quarantine":
+            return False
+
+        q_until = self._coerce_datetime(quarantine_until)
+        if q_until is not None and q_until > datetime.utcnow():
+            return False
+
+        return True
+
     def _resolve_monthly_signal_counts(
         self,
         prev_last_z_score: float | None,
@@ -405,7 +429,11 @@ class SignalWorker:
         prev_abs = abs(float(prev_last_z_score)) if prev_last_z_score is not None else 0.0
         current_abs = abs(float(current_last_z_score))
 
-        signal_hit = 1 if (prev_abs < self.entry_abs_z_threshold and current_abs >= self.entry_abs_z_threshold) else 0
+        signal_hit = 1 if (
+            allow_signal_count
+            and prev_abs < self.entry_abs_z_threshold
+            and current_abs >= self.entry_abs_z_threshold
+        ) else 0
 
         if signal_hit == 1:
             signal_this_month += 1
@@ -454,35 +482,6 @@ class SignalWorker:
             raise ValueError(f"Rules file is empty: {file_path}")
 
         return rules
-
-
-def _pair_is_countable_signal_source(self, pair_row: dict[str, Any]) -> bool:
-    adf = pair_row.get("adf")
-    p_value = pair_row.get("p_value")
-    level_30 = pair_row.get("level_30")
-    level_180 = pair_row.get("level_180")
-    quarantine_until = pair_row.get("quarantine_until")
-
-    if adf is None or p_value is None:
-        return False
-
-    if float(adf) >= self.adf_threshold:
-        return False
-
-    if float(p_value) >= self.p_value_threshold:
-        return False
-
-    if str(level_30 or "").lower() == "quarantine":
-        return False
-
-    if str(level_180 or "").lower() == "quarantine":
-        return False
-
-    q_until = self._coerce_datetime(quarantine_until)
-    if q_until is not None and q_until > datetime.utcnow():
-        return False
-
-    return True
 
 
 if __name__ == "__main__":
