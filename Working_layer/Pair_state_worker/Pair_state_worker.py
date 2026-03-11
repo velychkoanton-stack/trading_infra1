@@ -121,6 +121,7 @@ class PairStateWorker:
 
     def run_once(self) -> None:
         self._remove_delisted_pairs()
+        self._sync_missing_pair_state_rows()
         self._insert_new_candidate_pairs()
 
         working_pairs = self._fetch_working_pairs()
@@ -181,6 +182,34 @@ class PairStateWorker:
             len(quarantine_uuids),
             len(removed_uuids),
         )
+
+    def _sync_missing_pair_state_rows(self) -> None:
+        rows = fetch_all(
+            sql=self.get_missing_pair_state_rows_sql,
+            api_file_name=self.mysql_api_file,
+        )
+
+        if not rows:
+            return
+
+        now_utc = datetime.utcnow()
+        params_seq = [
+            {
+                "uuid": row["uuid"],
+                "last_update_ts": now_utc,
+            }
+            for row in rows
+        ]
+
+        execute_many(
+            sql=self.insert_pair_state_pair_sql,
+            api_file_name=self.mysql_api_file,
+            params_seq=params_seq,
+        )
+
+        self.logger.info("Backfilled missing pair_state rows from signal_table | count=%s", len(rows))
+
+
 
     def _remove_delisted_pairs(self) -> None:
         rows = fetch_all(

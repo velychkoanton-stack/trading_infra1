@@ -1,0 +1,7 @@
+SELECT
+    st.uuid
+FROM signal_table st
+LEFT JOIN pair_state ps
+    ON ps.uuid = st.uuid
+WHERE ps.uuid IS NULL
+ORDER BY st.uuid;
