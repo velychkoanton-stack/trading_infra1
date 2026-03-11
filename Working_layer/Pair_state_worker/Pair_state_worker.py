@@ -77,6 +77,9 @@ class PairStateWorker:
         self.update_pair_state_metrics_sql = load_sql_file(self.sql_dir / "update_pair_state_metrics.txt")
         self.mark_pair_universe_quarantine_sql = load_sql_file(self.sql_dir / "mark_pair_universe_quarantine.txt")
         self.mark_pair_universe_removed_sql = load_sql_file(self.sql_dir / "mark_pair_universe_removed.txt")
+        self.min_aligned_candles = int(self.rules.get("min_aligned_candles", "800"))
+        self.quarantine_recent_trade_days = int(self.rules.get("quarantine_recent_trade_days", "7"))
+
 
     def run_forever(self) -> None:
         self.logger.info("Pair_state worker started | loop_minutes=%s", self.loop_minutes)
@@ -355,7 +358,7 @@ class PairStateWorker:
         aligned = align_close_series(df_1, df_2, ts_column="ts", close_column="close")
         aligned_len = len(aligned)
 
-        if aligned_len < self.lookback_candles:
+        if aligned_len < self.min_aligned_candles:
             raise ValueError(
                 f"Not enough aligned candles for uuid={uuid}. "
                 f"aligned_len={aligned_len}, required={self.lookback_candles}, "
@@ -580,16 +583,18 @@ class PairStateWorker:
         if not by_day:
             return False
 
-        losing_streak = 0
-        for day in sorted(by_day.keys(), reverse=True):
-            if by_day[day] < 0:
-                losing_streak += 1
-                if losing_streak >= streak_required:
-                    return True
-            else:
-                break
+        sorted_days_desc = sorted(by_day.keys(), reverse=True)
+        latest_trade_day = sorted_days_desc[0]
 
-        return False
+        days_since_latest_trade = (now_utc.date() - latest_trade_day).days
+        if days_since_latest_trade > self.quarantine_recent_trade_days:
+            return False
+
+        recent_trade_days = sorted_days_desc[:streak_required]
+        if len(recent_trade_days) < streak_required:
+            return False
+
+        return all(by_day[day] < 0 for day in recent_trade_days)
 
     def _resolve_level_30(self, is_cointegrated: bool, metrics_30: dict[str, Any]) -> str:
         if not is_cointegrated:

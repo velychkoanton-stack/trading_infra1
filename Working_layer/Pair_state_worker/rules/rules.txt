@@ -12,6 +12,7 @@ p_value_threshold=0.05
 
 quarantine_days=14
 quarantine_losing_days_streak=5
+quarantine_recent_trade_days=7
 
 same_event_window_minutes=10
 
