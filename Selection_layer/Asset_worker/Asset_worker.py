@@ -1,13 +1,17 @@
 from __future__ import annotations
 
+import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 
 from Common.config.path_config import get_project_root
 from Common.config.rules_loader import load_rules_file
 from Common.db.db_execute import execute, execute_many, fetch_all
+from Common.db.heartbeat_writer import write_heartbeat
 from Common.exchange.bybit_client import (
     build_not_in_params,
     create_bybit_client,
@@ -18,6 +22,9 @@ from Common.parquet.parquet_writer import write_symbol_ohlcv_parquet
 from Common.statistics.adf_test import run_adf_test_from_close_df
 from Common.utils.cleanup import cleanup_objects, force_gc
 from Common.utils.logger import setup_logger
+
+
+VALID_SLEEP_STATUSES = {"SLEEP", "STOP", "SL_BLOCK"}
 
 
 def load_text_file(file_path: Path) -> str:
@@ -31,8 +38,7 @@ def str_to_bool(value: str) -> bool:
 
 
 def build_ohlcv_dataframe(rows: list[list[Any]]) -> pd.DataFrame:
-    df = pd.DataFrame(rows, columns=["ts", "open", "high", "low", "close", "volume"])
-    return df
+    return pd.DataFrame(rows, columns=["ts", "open", "high", "low", "close", "volume"])
 
 
 def compute_liquidity_metrics(df: pd.DataFrame) -> tuple[float, float]:
@@ -80,6 +86,12 @@ class AssetWorker:
         self.bybit_api_file = self.rules["BYBIT_API_FILE"]
         self.mysql_api_file = self.rules["MYSQL_API_FILE"]
 
+        self.worker_name = self.rules.get("WORKER_NAME", "asset_worker")
+        self.timezone_name = self.rules.get("TIMEZONE", "Europe/Amsterdam")
+        self.scheduler_sleep_check_sec = int(self.rules.get("SCHEDULER_SLEEP_CHECK_SEC", "3600"))
+
+        self.tz = ZoneInfo(self.timezone_name)
+
         log_file = self.project_root / self.rules["LOG_FILE"]
         self.logger = setup_logger("asset_worker", log_file)
 
@@ -90,14 +102,23 @@ class AssetWorker:
             self.sql_dir / "update_asset_skip_fresh.txt"
         )
         self.sql_update_asset_tested = load_text_file(self.sql_dir / "update_asset_tested.txt")
+        self.sql_get_scheduler_statuses = load_text_file(
+            self.sql_dir / "get_scheduler_statuses.txt"
+        )
 
         self.bybit_client = create_bybit_client(self.bybit_api_file)
 
     def sync_exchange_symbols(self) -> list[str]:
-        listed_symbols = fetch_linear_perpetual_symbols(self.bybit_client)
+        listed_symbols_raw = fetch_linear_perpetual_symbols(self.bybit_client)
+
+        listed_symbols = sorted(
+            symbol
+            for symbol in listed_symbols_raw
+            if str(symbol).endswith("/USDT:USDT")
+        )
 
         if not listed_symbols:
-            raise RuntimeError("Bybit returned zero listed linear perpetual symbols. Sync aborted.")
+            raise RuntimeError("Bybit returned zero listed /USDT:USDT linear perpetual symbols. Sync aborted.")
 
         params_seq = [(symbol,) for symbol in listed_symbols]
         execute_many(
@@ -116,7 +137,11 @@ class AssetWorker:
             params=params,
         )
 
-        self.logger.info("Market sync completed | listed_symbols=%s", len(listed_symbols))
+        self.logger.info(
+            "Market sync completed | listed_symbols_total=%s | filtered_usdt_symbols=%s",
+            len(listed_symbols_raw),
+            len(listed_symbols),
+        )
         return listed_symbols
 
     def select_assets_for_processing(self) -> list[dict[str, Any]]:
@@ -222,8 +247,8 @@ class AssetWorker:
         cleanup_objects(rows, df, adf_result)
         force_gc()
 
-    def run(self) -> None:
-        self.logger.info("Asset worker started")
+    def run_one_cycle(self) -> tuple[int, int]:
+        self.logger.info("Asset worker daily cycle started")
 
         listed_symbols = self.sync_exchange_symbols()
         self.logger.info("Listed symbols synced | count=%s", len(listed_symbols))
@@ -262,15 +287,129 @@ class AssetWorker:
             force_gc()
 
         self.logger.info(
-            "Asset worker finished | total_processed=%s batches=%s",
+            "Asset worker daily cycle finished | total_processed=%s batches=%s",
             total_processed,
             batch_number,
         )
+        return total_processed, batch_number
+
+    def _get_effective_control_status(self) -> tuple[str, str]:
+        rows = fetch_all(
+            sql=self.sql_get_scheduler_statuses,
+            api_file_name=self.mysql_api_file,
+            params={"worker_id": self.worker_name},
+        )
+
+        mapped = {row["worker_id"]: row for row in rows}
+        global_row = mapped.get("GLOBAL")
+        worker_row = mapped.get(self.worker_name)
+
+        if global_row and str(global_row.get("control_status", "")).upper() in VALID_SLEEP_STATUSES:
+            return str(global_row["control_status"]).upper(), str(global_row.get("comment") or "")
+
+        if worker_row:
+            return str(worker_row.get("control_status", "RUNNING")).upper(), str(worker_row.get("comment") or "")
+
+        return "RUNNING", "default_missing_scheduler_row"
+
+    def _safe_write_heartbeat(self, runtime_status: str, comment: str | None) -> None:
+        try:
+            write_heartbeat(
+                worker_id=self.worker_name,
+                runtime_status=runtime_status,
+                comment=self._truncate_comment(comment),
+                api_file_name=self.mysql_api_file,
+            )
+        except Exception:
+            self.logger.exception(
+                "Failed to write heartbeat | worker=%s | runtime_status=%s | comment=%s",
+                self.worker_name,
+                runtime_status,
+                comment,
+            )
+
+    def _get_local_today_str(self) -> str:
+        return datetime.now(self.tz).strftime("%Y-%m-%d")
+
+    @staticmethod
+    def _truncate_comment(comment: str | None, max_len: int = 64) -> str | None:
+        if comment is None:
+            return None
+        return str(comment)[:max_len]
+
+    def run_forever(self) -> None:
+        self.logger.info(
+            "Asset worker started | worker_name=%s | timezone=%s | scheduler_sleep_check_sec=%s",
+            self.worker_name,
+            self.timezone_name,
+            self.scheduler_sleep_check_sec,
+        )
+
+        last_completed_local_day: str | None = None
+
+        while True:
+            try:
+                control_status, control_comment = self._get_effective_control_status()
+                today_local = self._get_local_today_str()
+
+                if control_status in VALID_SLEEP_STATUSES:
+                    self._safe_write_heartbeat(
+                        runtime_status="SLEEPING",
+                        comment=f"sleep_by_scheduler:{control_status}",
+                    )
+                    self.logger.info(
+                        "Asset worker sleeping by scheduler | status=%s | comment=%s",
+                        control_status,
+                        control_comment,
+                    )
+                    time.sleep(self.scheduler_sleep_check_sec)
+                    continue
+
+                if last_completed_local_day == today_local:
+                    self._safe_write_heartbeat(
+                        runtime_status="SLEEPING",
+                        comment="daily_cycle_already_done",
+                    )
+                    self.logger.info(
+                        "Asset worker daily cycle already completed today | date=%s",
+                        today_local,
+                    )
+                    time.sleep(self.scheduler_sleep_check_sec)
+                    continue
+
+                self._safe_write_heartbeat("RUNNING", "daily_cycle_started")
+                total_processed, batch_number = self.run_one_cycle()
+                last_completed_local_day = today_local
+
+                self._safe_write_heartbeat(
+                    "RUNNING",
+                    f"daily_cycle_done:assets={total_processed},batches={batch_number}",
+                )
+
+                self.logger.info(
+                    "Asset worker cycle complete | date=%s | total_processed=%s | batches=%s",
+                    today_local,
+                    total_processed,
+                    batch_number,
+                )
+
+                time.sleep(self.scheduler_sleep_check_sec)
+
+            except Exception as exc:
+                self.logger.exception("Asset worker loop failed")
+                self._safe_write_heartbeat(
+                    runtime_status="ERROR",
+                    comment=f"loop_error:{type(exc).__name__}",
+                )
+                time.sleep(10)
+
+            finally:
+                force_gc()
 
 
 def main() -> None:
     worker = AssetWorker()
-    worker.run()
+    worker.run_forever()
 
 
 if __name__ == "__main__":

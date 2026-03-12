@@ -27,6 +27,14 @@ class WeekendWindow:
     end_minute: int
 
 
+@dataclass(frozen=True)
+class DailyWindow:
+    start_hour: int
+    start_minute: int
+    end_hour: int
+    end_minute: int
+
+
 class SchedulerWorker:
     def __init__(self) -> None:
         self.scheduler_dir = Path(__file__).resolve().parent
@@ -126,9 +134,6 @@ class SchedulerWorker:
         )
 
     def _safe_write_heartbeat(self, runtime_status: str, comment: str | None) -> None:
-        """
-        Heartbeat must never break the scheduler loop.
-        """
         try:
             write_heartbeat(
                 worker_id="scheduler",
@@ -159,13 +164,13 @@ class SchedulerWorker:
         is_weekend_block = self._is_within_weekend_window(now_local, self.weekend_window)
 
         for worker_id, worker_rules in self.worker_matrix.items():
-            # GLOBAL is manual/top-level control and is not auto-modified by scheduler.
             if worker_id == "GLOBAL":
                 continue
 
             control_status, comment = self._resolve_control_state(
                 worker_id=worker_id,
                 worker_rules=worker_rules,
+                now_local=now_local,
                 is_weekend_block=is_weekend_block,
             )
 
@@ -182,6 +187,7 @@ class SchedulerWorker:
         self,
         worker_id: str,
         worker_rules: dict[str, str],
+        now_local: datetime,
         is_weekend_block: bool,
     ) -> tuple[str, str]:
         enabled = self._parse_bool(worker_rules.get("enabled", "1"))
@@ -194,14 +200,29 @@ class SchedulerWorker:
         if not enabled:
             return "STOP", "disabled_in_rules"
 
-        # Daily SL is intentionally not applied yet because bot_daily_snapshot schema
-        # and query contract have not been finalized in this step.
-        # worker_rules["daily_sl_pct"] is already kept in rules.txt for the next stage.
+        if self._worker_has_daily_window(worker_rules):
+            daily_window = self._parse_daily_window(
+                worker_rules["daily_window_start"],
+                worker_rules["daily_window_end"],
+            )
+            daily_window_status = worker_rules.get("daily_window_status", "RUNNING").strip().upper()
+            daily_outside_status = worker_rules.get("daily_outside_status", default_status).strip().upper()
+
+            self._validate_control_status(daily_window_status, worker_id, "daily_window_status")
+            self._validate_control_status(daily_outside_status, worker_id, "daily_outside_status")
+
+            if self._is_within_daily_window(now_local, daily_window):
+                return daily_window_status, "daily_window"
+            return daily_outside_status, "outside_daily_window"
 
         if is_weekend_block:
             return weekend_mode, "weekend_schedule"
 
         return default_status, "default_status"
+
+    @staticmethod
+    def _worker_has_daily_window(worker_rules: dict[str, str]) -> bool:
+        return "daily_window_start" in worker_rules and "daily_window_end" in worker_rules
 
     @staticmethod
     def _rows_equal(current_row: dict[str, Any], desired_row: dict[str, Any]) -> bool:
@@ -335,6 +356,32 @@ class SchedulerWorker:
         return day_map[day_part], hour, minute
 
     @staticmethod
+    def _parse_daily_window(start_value: str, end_value: str) -> DailyWindow:
+        start_hour, start_minute = SchedulerWorker._parse_clock_time(start_value)
+        end_hour, end_minute = SchedulerWorker._parse_clock_time(end_value)
+
+        return DailyWindow(
+            start_hour=start_hour,
+            start_minute=start_minute,
+            end_hour=end_hour,
+            end_minute=end_minute,
+        )
+
+    @staticmethod
+    def _parse_clock_time(value: str) -> tuple[int, int]:
+        parts = value.strip().split(":")
+        if len(parts) != 2:
+            raise ValueError(f"Invalid clock time format: {value}. Expected HH:MM")
+
+        hour = int(parts[0])
+        minute = int(parts[1])
+
+        if not (0 <= hour <= 23 and 0 <= minute <= 59):
+            raise ValueError(f"Invalid clock time: {value}")
+
+        return hour, minute
+
+    @staticmethod
     def _is_within_weekend_window(now_local: datetime, weekend_window: WeekendWindow) -> bool:
         current_minutes = now_local.weekday() * 1440 + now_local.hour * 60 + now_local.minute
         start_minutes = (
@@ -347,6 +394,17 @@ class SchedulerWorker:
             + weekend_window.end_hour * 60
             + weekend_window.end_minute
         )
+
+        if start_minutes <= end_minutes:
+            return start_minutes <= current_minutes < end_minutes
+
+        return current_minutes >= start_minutes or current_minutes < end_minutes
+
+    @staticmethod
+    def _is_within_daily_window(now_local: datetime, daily_window: DailyWindow) -> bool:
+        current_minutes = now_local.hour * 60 + now_local.minute
+        start_minutes = daily_window.start_hour * 60 + daily_window.start_minute
+        end_minutes = daily_window.end_hour * 60 + daily_window.end_minute
 
         if start_minutes <= end_minutes:
             return start_minutes <= current_minutes < end_minutes

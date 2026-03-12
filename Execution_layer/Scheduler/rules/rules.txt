@@ -27,6 +27,10 @@ worker.asset_worker.weekend_mode=RUNNING
 worker.asset_worker.daily_sl_pct=NONE
 worker.asset_worker.heartbeat_sec=300
 worker.asset_worker.loop_sec=300
+worker.asset_worker.daily_window_start=00:30
+worker.asset_worker.daily_window_end=01:30
+worker.asset_worker.daily_window_status=RUNNING
+worker.asset_worker.daily_outside_status=SLEEP
 
 worker.pair_worker.enabled=1
 worker.pair_worker.default_status=RUNNING

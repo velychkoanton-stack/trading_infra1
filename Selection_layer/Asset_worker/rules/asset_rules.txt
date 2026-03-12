@@ -14,3 +14,7 @@ BYBIT_API_FILE=api_bybit_main.txt
 MYSQL_API_FILE=api_mysql_main.txt
 
 LOG_FILE=data/logs/asset_worker.log
+
+WORKER_NAME=asset_worker
+TIMEZONE=Europe/Amsterdam
+SCHEDULER_SLEEP_CHECK_SEC=3600
