@@ -1,56 +1,75 @@
+from __future__ import annotations
+
 import time
+from typing import Optional
+
 import requests
-from pathlib import Path
 
-from Common.utils.api_file_loader import load_api_file
+from Common.config.api_loader import load_api_file
+from Common.config.path_config import get_api_file_path
 
 
-API_FILE = "api_telegram_main.txt"
 API_URL = "https://api.telegram.org/bot{token}/sendMessage"
 
 
-class TelegramSender:
+def _load_telegram_config(api_file_name: str = "api_telegram_main.txt") -> tuple[str, str]:
+    file_path = get_api_file_path(api_file_name)
+    config = load_api_file(file_path)
 
-    def __init__(self):
-        api = load_api_file(API_FILE)
+    token = (
+        config.get("token")
+        or config.get("TOKEN")
+        or config.get("TELEGRAM_BOT_TOKEN")
+        or config.get("BOT_TOKEN")
+    )
+    chat_id = (
+        config.get("chat_id")
+        or config.get("CHAT_ID")
+        or config.get("TELEGRAM_CHAT_ID")
+        or config.get("TG_CHAT_ID")
+    )
 
-        self.token = api["token"]
-        self.chat_id = api["chat_id"]
+    if not token:
+        raise ValueError(f"Telegram token not found in API file: {api_file_name}")
 
-        self.url = API_URL.format(token=self.token)
+    if not chat_id:
+        raise ValueError(f"Telegram chat_id not found in API file: {api_file_name}")
 
-    def send(self, text: str, parse_mode: str | None = None) -> bool:
+    return str(token).strip(), str(chat_id).strip()
 
-        payload = {
-            "chat_id": self.chat_id,
-            "text": text,
-            "disable_web_page_preview": True,
-        }
 
-        if parse_mode:
-            payload["parse_mode"] = parse_mode
+def send_tg_message(
+    text: str,
+    parse_mode: Optional[str] = None,
+    disable_web_page_preview: bool = True,
+    api_file_name: str = "api_telegram_main.txt",
+) -> bool:
+    token, chat_id = _load_telegram_config(api_file_name=api_file_name)
+    url = API_URL.format(token=token)
 
-        for attempt in range(1, 4):
-            try:
-                r = requests.post(self.url, json=payload, timeout=10)
+    payload = {
+        "chat_id": chat_id,
+        "text": text,
+        "disable_web_page_preview": disable_web_page_preview,
+    }
 
-                if r.ok:
-                    return True
+    if parse_mode:
+        payload["parse_mode"] = parse_mode
 
-                if r.status_code in (429, 500, 502, 503, 504):
-                    time.sleep(min(2 * attempt, 5))
-                    continue
+    for attempt in range(1, 4):
+        try:
+            response = requests.post(url, json=payload, timeout=10)
 
-                return False
+            if response.ok:
+                return True
 
-            except Exception:
+            if response.status_code in (429, 500, 502, 503, 504):
                 time.sleep(min(2 * attempt, 5))
+                continue
 
-        return False
+            return False
 
+        except Exception:
+            time.sleep(min(2 * attempt, 5))
 
-tg = TelegramSender()
-
-
-def send_tg_message(text: str, parse_mode: str | None = None) -> bool:
-    return tg.send(text, parse_mode=parse_mode)
+    return False
