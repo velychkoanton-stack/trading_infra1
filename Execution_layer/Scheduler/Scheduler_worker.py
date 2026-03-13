@@ -12,6 +12,7 @@ from Common.db.heartbeat_writer import write_heartbeat
 from Common.utils.cleanup import force_gc
 from Common.utils.logger import setup_logger
 from Common.utils.sql_file_loader import load_sql_file
+from Common.utils.telegram_sender import send_tg_message
 
 
 VALID_CONTROL_STATUSES = {"RUNNING", "SLEEP", "SL_BLOCK", "STOP"}
@@ -51,10 +52,31 @@ class SchedulerWorker:
 
         self.rules = self._load_rules_file(self.rules_path)
         self.mysql_api_file = self.rules.get("mysql_api_file", "api_mysql_main.txt")
+        self.telegram_api_file = self.rules.get("telegram_api_file", "api_telegram_main.txt")
         self.loop_sec = self._parse_positive_int(self.rules.get("scheduler_loop_sec", "60"), "scheduler_loop_sec")
         self.update_only_on_change = self._parse_bool(self.rules.get("update_only_on_change", "1"))
         self.timezone_name = self.rules.get("timezone", "Europe/Amsterdam")
         self.tz = ZoneInfo(self.timezone_name)
+
+        self.heartbeat_monitor_enabled = self._parse_bool(
+            self.rules.get("heartbeat_monitor_enabled", "1")
+        )
+        self.heartbeat_alert_resend_sec = self._parse_positive_int(
+            self.rules.get("heartbeat_alert_resend_sec", "1800"),
+            "heartbeat_alert_resend_sec",
+        )
+        self.heartbeat_send_recovery = self._parse_bool(
+            self.rules.get("heartbeat_send_recovery", "1")
+        )
+        self.heartbeat_stale_multiplier = self._parse_positive_int(
+            self.rules.get("heartbeat_stale_multiplier", "2"),
+            "heartbeat_stale_multiplier",
+        )
+        self.heartbeat_stale_min_sec = self._parse_positive_int(
+            self.rules.get("heartbeat_stale_min_sec", "120"),
+            "heartbeat_stale_min_sec",
+        )
+
         self.weekend_window = self._parse_weekend_window(
             self.rules["weekend_block_start"],
             self.rules["weekend_block_end"],
@@ -63,6 +85,9 @@ class SchedulerWorker:
 
         self.select_scheduler_all_sql = load_sql_file(self.sql_dir / "select_scheduler_all.txt")
         self.upsert_scheduler_row_sql = load_sql_file(self.sql_dir / "upsert_scheduler_row.txt")
+        self.select_bot_heartbeat_all_sql = load_sql_file(self.sql_dir / "select_bot_heartbeat_all.txt")
+
+        self.active_alerts: dict[str, dict[str, Any]] = {}
 
     def run_forever(self) -> None:
         self.logger.info("Scheduler worker started. loop_sec=%s timezone=%s", self.loop_sec, self.timezone_name)
@@ -133,6 +158,12 @@ class SchedulerWorker:
             now_local.strftime("%Y-%m-%d %H:%M:%S %Z"),
         )
 
+        if self.heartbeat_monitor_enabled:
+            self._monitor_scheduler_vs_heartbeat(
+                desired_rows=desired_rows,
+                now_naive=now_naive,
+            )
+
     def _safe_write_heartbeat(self, runtime_status: str, comment: str | None) -> None:
         try:
             write_heartbeat(
@@ -151,6 +182,13 @@ class SchedulerWorker:
     def _fetch_existing_scheduler_rows(self) -> dict[str, dict[str, Any]]:
         rows = fetch_all(
             sql=self.select_scheduler_all_sql,
+            api_file_name=self.mysql_api_file,
+        )
+        return {row["worker_id"]: row for row in rows}
+
+    def _fetch_heartbeat_rows(self) -> dict[str, dict[str, Any]]:
+        rows = fetch_all(
+            sql=self.select_bot_heartbeat_all_sql,
             api_file_name=self.mysql_api_file,
         )
         return {row["worker_id"]: row for row in rows}
@@ -213,12 +251,240 @@ class SchedulerWorker:
 
             if self._is_within_daily_window(now_local, daily_window):
                 return daily_window_status, "daily_window"
+
             return daily_outside_status, "outside_daily_window"
 
         if is_weekend_block:
             return weekend_mode, "weekend_schedule"
 
         return default_status, "default_status"
+
+    def _monitor_scheduler_vs_heartbeat(
+        self,
+        desired_rows: dict[str, dict[str, Any]],
+        now_naive: datetime,
+    ) -> None:
+        heartbeat_rows = self._fetch_heartbeat_rows()
+
+        for worker_id, desired_row in desired_rows.items():
+            issue_type, issue_message = self._detect_worker_issue(
+                worker_id=worker_id,
+                desired_row=desired_row,
+                heartbeat_row=heartbeat_rows.get(worker_id),
+                now_naive=now_naive,
+            )
+
+            alert_key = worker_id
+
+            if issue_type is None:
+                self._resolve_alert_if_needed(
+                    alert_key=alert_key,
+                    worker_id=worker_id,
+                    now_naive=now_naive,
+                )
+                continue
+
+            self._register_or_send_alert(
+                alert_key=alert_key,
+                worker_id=worker_id,
+                issue_type=issue_type,
+                issue_message=issue_message,
+                now_naive=now_naive,
+            )
+
+    def _detect_worker_issue(
+        self,
+        worker_id: str,
+        desired_row: dict[str, Any],
+        heartbeat_row: dict[str, Any] | None,
+        now_naive: datetime,
+    ) -> tuple[str | None, str | None]:
+        expected_control = str(desired_row.get("control_status", "RUNNING")).upper()
+        expected_runtime_statuses = self._expected_runtime_statuses(expected_control)
+
+        if heartbeat_row is None:
+            return (
+                "missing_heartbeat",
+                self._build_alert_message(
+                    worker_id=worker_id,
+                    desired_control=expected_control,
+                    desired_comment=str(desired_row.get("comment") or ""),
+                    runtime_status="MISSING",
+                    runtime_comment="",
+                    heartbeat_age_sec=None,
+                    issue_type="missing_heartbeat",
+                ),
+            )
+
+        runtime_status = str(heartbeat_row.get("runtime_status", "")).upper()
+        runtime_comment = str(heartbeat_row.get("comment") or "")
+        heartbeat_ts = heartbeat_row.get("last_update_ts")
+
+        if heartbeat_ts is None or not isinstance(heartbeat_ts, datetime):
+            return (
+                "invalid_heartbeat_ts",
+                self._build_alert_message(
+                    worker_id=worker_id,
+                    desired_control=expected_control,
+                    desired_comment=str(desired_row.get("comment") or ""),
+                    runtime_status=runtime_status or "UNKNOWN",
+                    runtime_comment=runtime_comment,
+                    heartbeat_age_sec=None,
+                    issue_type="invalid_heartbeat_ts",
+                ),
+            )
+
+        heartbeat_age_sec = max(0.0, (now_naive - heartbeat_ts).total_seconds())
+        stale_threshold_sec = self._get_stale_threshold_sec(worker_id)
+
+        if heartbeat_age_sec > stale_threshold_sec:
+            return (
+                "stale_heartbeat",
+                self._build_alert_message(
+                    worker_id=worker_id,
+                    desired_control=expected_control,
+                    desired_comment=str(desired_row.get("comment") or ""),
+                    runtime_status=runtime_status,
+                    runtime_comment=runtime_comment,
+                    heartbeat_age_sec=heartbeat_age_sec,
+                    issue_type="stale_heartbeat",
+                ),
+            )
+
+        if runtime_status not in expected_runtime_statuses:
+            return (
+                "runtime_mismatch",
+                self._build_alert_message(
+                    worker_id=worker_id,
+                    desired_control=expected_control,
+                    desired_comment=str(desired_row.get("comment") or ""),
+                    runtime_status=runtime_status,
+                    runtime_comment=runtime_comment,
+                    heartbeat_age_sec=heartbeat_age_sec,
+                    issue_type="runtime_mismatch",
+                ),
+            )
+
+        return None, None
+
+    def _register_or_send_alert(
+        self,
+        alert_key: str,
+        worker_id: str,
+        issue_type: str,
+        issue_message: str,
+        now_naive: datetime,
+    ) -> None:
+        state = self.active_alerts.get(alert_key)
+
+        if state is None or state["issue_type"] != issue_type:
+            self.active_alerts[alert_key] = {
+                "worker_id": worker_id,
+                "issue_type": issue_type,
+                "first_seen_ts": now_naive,
+                "last_sent_ts": None,
+            }
+            return
+
+        first_seen_ts = state["first_seen_ts"]
+        issue_age_sec = max(0.0, (now_naive - first_seen_ts).total_seconds())
+        stale_threshold_sec = self._get_stale_threshold_sec(worker_id)
+        last_sent_ts = state["last_sent_ts"]
+
+        if issue_age_sec < stale_threshold_sec:
+            return
+
+        if last_sent_ts is not None:
+            resend_age_sec = max(0.0, (now_naive - last_sent_ts).total_seconds())
+            if resend_age_sec < self.heartbeat_alert_resend_sec:
+                return
+
+        send_ok = send_tg_message(
+            text=issue_message,
+            api_file_name=self.telegram_api_file,
+        )
+
+        if send_ok:
+            self.logger.warning("Heartbeat monitor alert sent | worker_id=%s | issue=%s", worker_id, issue_type)
+            state["last_sent_ts"] = now_naive
+        else:
+            self.logger.error("Heartbeat monitor alert failed to send | worker_id=%s | issue=%s", worker_id, issue_type)
+
+    def _resolve_alert_if_needed(
+        self,
+        alert_key: str,
+        worker_id: str,
+        now_naive: datetime,
+    ) -> None:
+        state = self.active_alerts.get(alert_key)
+        if state is None:
+            return
+
+        last_sent_ts = state.get("last_sent_ts")
+        issue_type = state.get("issue_type", "unknown")
+
+        if self.heartbeat_send_recovery and last_sent_ts is not None:
+            recovery_message = (
+                "✅ Scheduler heartbeat recovery\n"
+                f"worker={worker_id}\n"
+                f"issue_cleared={issue_type}\n"
+                f"time={now_naive.strftime('%Y-%m-%d %H:%M:%S')}"
+            )
+
+            send_ok = send_tg_message(
+                text=recovery_message,
+                api_file_name=self.telegram_api_file,
+            )
+
+            if send_ok:
+                self.logger.info("Heartbeat monitor recovery sent | worker_id=%s | issue=%s", worker_id, issue_type)
+            else:
+                self.logger.error("Heartbeat monitor recovery failed to send | worker_id=%s | issue=%s", worker_id, issue_type)
+
+        self.active_alerts.pop(alert_key, None)
+
+    def _get_stale_threshold_sec(self, worker_id: str) -> int:
+        worker_rules = self.worker_matrix.get(worker_id, {})
+        heartbeat_sec = int(worker_rules.get("heartbeat_sec", self.loop_sec))
+        return max(self.heartbeat_stale_min_sec, heartbeat_sec * self.heartbeat_stale_multiplier)
+
+    @staticmethod
+    def _expected_runtime_statuses(control_status: str) -> set[str]:
+        control_status = str(control_status).upper()
+
+        if control_status == "RUNNING":
+            return {"RUNNING"}
+
+        if control_status in {"SLEEP", "SL_BLOCK"}:
+            return {"SLEEPING"}
+
+        if control_status == "STOP":
+            return {"SLEEPING", "STOPPED"}
+
+        return {"RUNNING"}
+
+    @staticmethod
+    def _build_alert_message(
+        worker_id: str,
+        desired_control: str,
+        desired_comment: str,
+        runtime_status: str,
+        runtime_comment: str,
+        heartbeat_age_sec: float | None,
+        issue_type: str,
+    ) -> str:
+        age_text = "unknown" if heartbeat_age_sec is None else f"{int(round(heartbeat_age_sec))}s"
+
+        return (
+            "⚠️ Scheduler / heartbeat mismatch\n"
+            f"worker={worker_id}\n"
+            f"issue={issue_type}\n"
+            f"scheduler_status={desired_control}\n"
+            f"scheduler_comment={desired_comment or '-'}\n"
+            f"heartbeat_status={runtime_status}\n"
+            f"heartbeat_comment={runtime_comment or '-'}\n"
+            f"heartbeat_age={age_text}"
+        )
 
     @staticmethod
     def _worker_has_daily_window(worker_rules: dict[str, str]) -> bool:

@@ -1,0 +1,6 @@
+SELECT
+    worker_id,
+    runtime_status,
+    last_update_ts,
+    comment
+FROM bot_heartbeat;
