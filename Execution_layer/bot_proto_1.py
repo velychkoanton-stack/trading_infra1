@@ -152,7 +152,7 @@ class BotProto1:
 def main() -> None:
     bot = BotProto1(
         environment="demo",                 # change to "real" later when needed
-        api_file_name="API/api_credentials_demo_1.txt",
+        api_file_name="api_credentials_demo_1.txt",
         support_monitor=True,               # full SupportLayer monitor
         support_monitor_interval_sec=5,
         proto_snapshot_interval_sec=10,     # compact summary
