@@ -110,7 +110,9 @@ class SupportConnection:
             api_file_name=self.api_file_name,
             demo=(self.environment == "demo"),
         )
-        return self.exchange
+        self.api_key = self.exchange.apiKey
+        self.api_secret = self.exchange.secret
+        return self.exchange    
 
     def bootstrap_rest(self) -> None:
         if self.exchange is None:
