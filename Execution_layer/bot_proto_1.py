@@ -41,7 +41,7 @@ class BotProto1:
     def __init__(
         self,
         environment: str = "demo",
-        api_file_name: str = "api_credentials.txt",
+        api_file_name: str = "api_credentials_demo_1.txt",
         support_monitor: bool = True,
         support_monitor_interval_sec: int = 5,
         proto_snapshot_interval_sec: int = 10,
