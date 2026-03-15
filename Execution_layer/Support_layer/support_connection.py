@@ -9,6 +9,8 @@ from typing import Any, Dict, Optional
 from pybit.unified_trading import WebSocket
 
 from Common.exchange.bybit_client import create_bybit_client
+from Common.config.api_loader import load_api_file
+from Common.config.path_config import get_api_file_path
 
 try:
     from .support_state import SupportState
@@ -79,12 +81,15 @@ class SupportConnection:
         return None
 
     def load_credentials(self) -> None:
-        if not self.credentials_file.exists():
-            # API file may also live in project config path, so this is not fatal here.
-            logger.info(
-                "%s | local credentials file not found at %s, Common loader will be used",
-                self.summary_log_prefix,
-                self.credentials_file,
+        api_path = get_api_file_path(self.api_file_name)
+        api_config = load_api_file(api_path)
+
+        self.api_key = api_config.get("API_KEY", "")
+        self.api_secret = api_config.get("API_SECRET", "")
+
+        if not self.api_key or not self.api_secret:
+            raise ValueError(
+                f"API_KEY / API_SECRET missing in api file: {api_path}"
             )
 
         raw: Dict[str, str] = {}
@@ -214,18 +219,7 @@ class SupportConnection:
 
     def _start_private_ws(self) -> None:
         if not self.api_key or not self.api_secret:
-            # pybit still needs keys directly; if not loaded from local file, read them from Common path
-            raw: Dict[str, str] = {}
-            if self.credentials_file.exists():
-                with open(self.credentials_file, "r", encoding="utf-8") as f:
-                    for line in f:
-                        line = line.strip()
-                        if not line or "=" not in line:
-                            continue
-                        key, value = line.split("=", 1)
-                        raw[key.strip()] = value.strip()
-                self.api_key = raw.get("api_key") or raw.get("API_KEY")
-                self.api_secret = raw.get("api_secret") or raw.get("API_SECRET")
+            raise RuntimeError("Credentials must be loaded before starting private WS")
 
         self.private_ws = WebSocket(
             testnet=False,
@@ -234,6 +228,7 @@ class SupportConnection:
             api_key=self.api_key,
             api_secret=self.api_secret,
         )
+            
 
         self.private_ws.wallet_stream(callback=self._on_wallet)
         self.private_ws.position_stream(callback=self._on_position)
