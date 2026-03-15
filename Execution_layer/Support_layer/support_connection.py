@@ -322,6 +322,7 @@ class SupportConnection:
             logger.warning("%s | unsubscribe failed for %s: %s", self.summary_log_prefix, symbol, exc)
 
         self.state.remove_subscribed_symbol(symbol)
+        self.state.cleanup_orphan_price_state()
 
     def _make_ticker_handler(self, symbol: str):
         def handler(message: Dict[str, Any]) -> None:
@@ -468,7 +469,9 @@ class SupportConnection:
                     public_stale_sec=20,
                 )
 
-                if health["private_stream_stale"] or health["public_stream_stale"]:
+                tracked_symbols = health.get("tracked_public_symbols", [])
+
+                if health["private_stream_stale"] or (tracked_symbols and health["public_stream_stale"]):
                     logger.warning(
                         "%s | watchdog detected stale stream | private=%s public=%s stale_symbols=%s",
                         self.summary_log_prefix,

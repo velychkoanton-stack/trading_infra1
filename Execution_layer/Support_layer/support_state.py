@@ -352,9 +352,14 @@ class SupportState:
             private_stale = (
                 last_private is None or (now_ms - last_private) > private_stale_sec * 1000
             )
-            public_stale = (
-                last_public is None or (now_ms - last_public) > public_stale_sec * 1000
-            )
+            tracked_public_symbols = sorted(self.subscribed_symbols)
+
+            if not tracked_public_symbols:
+                public_stale = False
+            else:
+                public_stale = (
+                    last_public is None or (now_ms - last_public) > public_stale_sec * 1000
+                )   
 
             stale_symbols: List[str] = []
             for symbol in self.subscribed_symbols:
