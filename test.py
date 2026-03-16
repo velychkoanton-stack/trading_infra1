@@ -12,3 +12,15 @@ print(state.get_all_open_pairs())
 from Common.db.db_transaction import run_in_transaction
 
 print("transaction helper imported OK")
+
+from Execution_layer.Executors.repositories import ExecutorRepositories
+
+print("repositories imported OK")
+
+from Execution_layer.Executors.order_manager import OrderManager
+
+print("order_manager imported OK")
+
+from Execution_layer.Executors.control_worker import ControlWorker
+
+print("control_worker imported OK")

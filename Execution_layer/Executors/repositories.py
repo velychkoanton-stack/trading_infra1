@@ -1,0 +1,228 @@
+from __future__ import annotations
+
+from datetime import date, datetime
+from pathlib import Path
+from typing import Optional
+
+from Common.db.db_execute import execute, fetch_all, fetch_one
+from Common.utils.sql_file_loader import load_sql_file
+
+from Execution_layer.Executors.models import CandidatePair
+
+
+class ExecutorRepositories:
+    """
+    Central DB gateway for executor layer.
+
+    All SQL access from executors goes through this class.
+    """
+
+    def __init__(self, api_file_name: str, sql_dir: str | Path):
+        self.api_file_name = api_file_name
+        self.sql_dir = Path(sql_dir)
+
+        # load SQL files once
+        self.sql_select_candidates = load_sql_file(self.sql_dir / "select_candidates_base.txt")
+        self.sql_select_candidate_by_uuid = load_sql_file(self.sql_dir / "select_candidate_by_uuid.txt")
+
+        self.sql_insert_asset_lock = load_sql_file(self.sql_dir / "insert_asset_lock.txt")
+        self.sql_delete_asset_locks = load_sql_file(self.sql_dir / "delete_asset_locks_by_uuid_bot.txt")
+
+        self.sql_insert_trade_open = load_sql_file(self.sql_dir / "insert_trade_open.txt")
+        self.sql_update_trade_close = load_sql_file(self.sql_dir / "update_trade_close.txt")
+
+        self.sql_select_scheduler_status = load_sql_file(self.sql_dir / "select_scheduler_status.txt")
+
+        self.sql_upsert_daily_snapshot = load_sql_file(self.sql_dir / "upsert_daily_snapshot.txt")
+        self.sql_update_daily_equity = load_sql_file(self.sql_dir / "update_daily_snapshot_equity.txt")
+
+        self.sql_upsert_position_value = load_sql_file(self.sql_dir / "upsert_bot_position_value.txt")
+        self.sql_delete_position_value = load_sql_file(self.sql_dir / "delete_bot_position_value.txt")
+
+    # -------------------------------------------------
+    # SIGNAL / PAIR STATE
+    # -------------------------------------------------
+
+    def fetch_candidate_pool(self) -> list[CandidatePair]:
+        rows = fetch_all(
+            sql=self.sql_select_candidates,
+            api_file_name=self.api_file_name,
+        )
+
+        result: list[CandidatePair] = []
+
+        for row in rows:
+            result.append(CandidatePair(**row))
+
+        return result
+
+    def fetch_candidate_by_uuid(self, uuid: str) -> Optional[CandidatePair]:
+        row = fetch_one(
+            sql=self.sql_select_candidate_by_uuid,
+            api_file_name=self.api_file_name,
+            params=(uuid,),
+        )
+
+        if not row:
+            return None
+
+        return CandidatePair(**row)
+
+    # -------------------------------------------------
+    # ASSET LOCKS
+    # -------------------------------------------------
+
+    def insert_asset_lock(self, bot_id: str, uuid: str, asset: str) -> int:
+        return execute(
+            sql=self.sql_insert_asset_lock,
+            api_file_name=self.api_file_name,
+            params={
+                "bot_id": bot_id,
+                "uuid": uuid,
+                "asset": asset,
+            },
+        )
+
+    def delete_asset_locks(self, bot_id: str, uuid: str) -> int:
+        return execute(
+            sql=self.sql_delete_asset_locks,
+            api_file_name=self.api_file_name,
+            params={
+                "bot_id": bot_id,
+                "uuid": uuid,
+            },
+        )
+
+    # -------------------------------------------------
+    # TRADE RESULTS
+    # -------------------------------------------------
+
+    def insert_trade_open(
+        self,
+        uuid: str,
+        bot_id: str,
+        pos_val: float,
+        open_cond: str | None,
+    ) -> int:
+        return execute(
+            sql=self.sql_insert_trade_open,
+            api_file_name=self.api_file_name,
+            params={
+                "uuid": uuid,
+                "bot_id": bot_id,
+                "pos_val": pos_val,
+                "open_cond": open_cond,
+            },
+        )
+
+    def update_trade_close(
+        self,
+        trade_id: int,
+        pnl: float,
+        pnl_pers: float,
+        closed_by: str,
+        close_cond: str | None,
+    ) -> int:
+        return execute(
+            sql=self.sql_update_trade_close,
+            api_file_name=self.api_file_name,
+            params={
+                "trade_id": trade_id,
+                "pnl": pnl,
+                "pnl_pers": pnl_pers,
+                "closed_by": closed_by,
+                "close_cond": close_cond,
+            },
+        )
+
+    # -------------------------------------------------
+    # SCHEDULER
+    # -------------------------------------------------
+
+    def get_scheduler_status(self, worker_id: str) -> str:
+        row = fetch_one(
+            sql=self.sql_select_scheduler_status,
+            api_file_name=self.api_file_name,
+            params=(worker_id,),
+        )
+
+        if not row:
+            return "RUNNING"
+
+        return row["control_status"]
+
+    # -------------------------------------------------
+    # DAILY SNAPSHOT
+    # -------------------------------------------------
+
+    def ensure_daily_snapshot(
+        self,
+        bot_id: str,
+        snapshot_date: date,
+        start_equity: float,
+        start_balance: float,
+        current_equity: float,
+        start_ts: datetime,
+    ) -> int:
+        return execute(
+            sql=self.sql_upsert_daily_snapshot,
+            api_file_name=self.api_file_name,
+            params={
+                "bot_id": bot_id,
+                "snapshot_date": snapshot_date,
+                "start_equity": start_equity,
+                "start_balance": start_balance,
+                "current_equity": current_equity,
+                "start_ts": start_ts,
+            },
+        )
+
+    def update_current_equity(
+        self,
+        bot_id: str,
+        snapshot_date: date,
+        current_equity: float,
+    ) -> int:
+        return execute(
+            sql=self.sql_update_daily_equity,
+            api_file_name=self.api_file_name,
+            params={
+                "bot_id": bot_id,
+                "snapshot_date": snapshot_date,
+                "current_equity": current_equity,
+            },
+        )
+
+    # -------------------------------------------------
+    # POSITION VALUE
+    # -------------------------------------------------
+
+    def upsert_position_value(
+        self,
+        bot_id: str,
+        uuid: str,
+        pos_value: float,
+        unrealized_pnl: float,
+        updated_at: datetime,
+    ) -> int:
+        return execute(
+            sql=self.sql_upsert_position_value,
+            api_file_name=self.api_file_name,
+            params={
+                "bot_id": bot_id,
+                "uuid": uuid,
+                "pos_value": pos_value,
+                "unrealized_pnl": unrealized_pnl,
+                "updated_at": updated_at,
+            },
+        )
+
+    def delete_position_value(self, bot_id: str, uuid: str) -> int:
+        return execute(
+            sql=self.sql_delete_position_value,
+            api_file_name=self.api_file_name,
+            params={
+                "bot_id": bot_id,
+                "uuid": uuid,
+            },
+        )
