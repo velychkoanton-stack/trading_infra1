@@ -466,25 +466,22 @@ class SupportConnection:
                 self.state.cleanup_orphan_price_state()
 
                 health = self.state.get_health_snapshot(
-                    private_stale_sec=60,
-                    public_stale_sec=45,
-                    public_symbol_grace_sec=30,
+                    private_stale_sec=300,
+                    public_stale_sec=120,
+                    public_symbol_grace_sec=60,
                 )
 
                 tracked_symbols = health.get("tracked_public_symbols", [])
                 stale_symbols = health.get("stale_symbols", [])
 
-                # Restart ONLY for private stream failure.
                 if health["private_stream_stale"]:
                     logger.warning(
-                        "%s | watchdog detected PRIVATE stale stream | stale_symbols=%s tracked=%s",
+                        "%s | watchdog detected PRIVATE stale state only | stale_symbols=%s tracked=%s",
                         self.summary_log_prefix,
                         stale_symbols,
                         tracked_symbols,
                     )
-                    self._restart_streams()
 
-                # Public stale is logged only, no restart.
                 elif stale_symbols:
                     logger.warning(
                         "%s | watchdog detected PUBLIC stale symbols only | stale_symbols=%s tracked=%s",
