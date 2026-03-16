@@ -472,19 +472,23 @@ class SupportConnection:
                 )
 
                 tracked_symbols = health.get("tracked_public_symbols", [])
-
                 stale_symbols = health.get("stale_symbols", [])
 
-                all_public_symbols_satle = (
+                all_public_symbols_stale = (
                     bool(tracked_symbols) and len(stale_symbols) == len(tracked_symbols)
                 )
-                if health["private_stream_stale"] or all_public_symbols_satle:
+
+                # Restart only if:
+                # 1) private stream is stale
+                # 2) ALL tracked public symbols are stale
+                if health["private_stream_stale"] or all_public_symbols_stale:
                     logger.warning(
-                        "%s | watchdog detected stale stream | private=%s public=%s stale_symbols=%s",
+                        "%s | watchdog detected stale stream | private=%s public=%s stale_symbols=%s tracked=%s",
                         self.summary_log_prefix,
                         health["private_stream_stale"],
                         health["public_stream_stale"],
-                        health["stale_symbols"],
+                        stale_symbols,
+                        tracked_symbols,
                     )
                     self._restart_streams()
 
@@ -494,6 +498,9 @@ class SupportConnection:
             time.sleep(5.0)
 
     def _restart_streams(self) -> None:
+        if self._stop_event.is_set():
+            return
+
         if not self._reconnect_lock.acquire(blocking=False):
             return
 
@@ -502,7 +509,7 @@ class SupportConnection:
                 return
 
             now = time.time()
-            if (now - self._last_restart_ts) < 15.0:
+            if (now - self._last_restart_ts) < 30.0:
                 return
 
             self._reconnect_in_progress = True
@@ -523,9 +530,8 @@ class SupportConnection:
             self.private_ws = None
             self.public_ws = None
 
-            time.sleep(2.0)
+            time.sleep(3.0)
 
-            # Re-bootstrap current truth from REST, then rebuild streams
             self.bootstrap_rest()
             self._start_private_ws()
             self._start_public_ws()
