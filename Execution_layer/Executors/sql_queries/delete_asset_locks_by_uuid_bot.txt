@@ -1,3 +1,2 @@
 DELETE FROM asset_locks
-WHERE bot_id = %(bot_id)s
-  AND uuid = %(uuid)s
+WHERE uuid = %(uuid)s

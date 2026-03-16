@@ -276,10 +276,17 @@ class ExecutorBase:
                 result.message,
             )
 
-            self.repositories.delete_asset_locks(
-                bot_id=self.bot_config.bot_id,
-                uuid=record.uuid,
-            )
+        deleted_rows = self.repositories.delete_asset_locks(
+            bot_id=self.bot_config.bot_id,
+            uuid=record.uuid,
+        )
+
+        self.logger.warning(
+            "unlock result uuid=%s bot_id=%s deleted_rows=%s",
+            record.uuid,
+            self.bot_config.bot_id,
+            deleted_rows,
+        )
 
         self.shared_state.remove_open_pair(record.uuid)
         self.shared_state.remove_pair_metrics(record.uuid)
