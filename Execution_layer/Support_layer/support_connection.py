@@ -474,23 +474,24 @@ class SupportConnection:
                 tracked_symbols = health.get("tracked_public_symbols", [])
                 stale_symbols = health.get("stale_symbols", [])
 
-                all_public_symbols_stale = (
-                    bool(tracked_symbols) and len(stale_symbols) == len(tracked_symbols)
-                )
-
-                # Restart only if:
-                # 1) private stream is stale
-                # 2) ALL tracked public symbols are stale
-                if health["private_stream_stale"] or all_public_symbols_stale:
+                # Restart ONLY for private stream failure.
+                if health["private_stream_stale"]:
                     logger.warning(
-                        "%s | watchdog detected stale stream | private=%s public=%s stale_symbols=%s tracked=%s",
+                        "%s | watchdog detected PRIVATE stale stream | stale_symbols=%s tracked=%s",
                         self.summary_log_prefix,
-                        health["private_stream_stale"],
-                        health["public_stream_stale"],
                         stale_symbols,
                         tracked_symbols,
                     )
                     self._restart_streams()
+
+                # Public stale is logged only, no restart.
+                elif stale_symbols:
+                    logger.warning(
+                        "%s | watchdog detected PUBLIC stale symbols only | stale_symbols=%s tracked=%s",
+                        self.summary_log_prefix,
+                        stale_symbols,
+                        tracked_symbols,
+                    )
 
             except Exception as exc:
                 logger.warning("%s | watchdog loop failed: %s", self.summary_log_prefix, exc)
