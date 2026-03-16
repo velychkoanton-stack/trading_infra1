@@ -63,6 +63,7 @@ class SupportConnection:
         self._watchdog_thread: Optional[threading.Thread] = None
         self._reconnect_lock = threading.Lock()
         self._reconnect_in_progress = False
+        self._last_restart_ts = 0.0
 
 
 
@@ -467,6 +468,7 @@ class SupportConnection:
                 health = self.state.get_health_snapshot(
                     private_stale_sec=60,
                     public_stale_sec=20,
+                    public_symbol_grace_sec=20,
                 )
 
                 tracked_symbols = health.get("tracked_public_symbols", [])
@@ -494,6 +496,10 @@ class SupportConnection:
             if self._reconnect_in_progress:
                 return
 
+            now = time.time()
+            if (now - self._last_restart_ts) < 15.0:
+                return
+
             self._reconnect_in_progress = True
             logger.warning("%s | restarting support streams", self.summary_log_prefix)
 
@@ -519,6 +525,7 @@ class SupportConnection:
             self._start_private_ws()
             self._start_public_ws()
 
+            self._last_restart_ts = time.time()
             logger.warning("%s | support streams restarted", self.summary_log_prefix)
 
         finally:

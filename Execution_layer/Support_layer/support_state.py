@@ -49,6 +49,7 @@ class SupportState:
             "order": None,
             "execution": None,
             "public_price_by_symbol": {},
+            "public_symbol_subscribed_at": {},
             "private_ws_started": None,
             "public_ws_started": None,
             "rest_bootstrap": None,
@@ -261,14 +262,17 @@ class SupportState:
                 pos["live_recalc_time_local"] = now_ms
 
     def add_subscribed_symbol(self, symbol: str) -> None:
+        now_ms = self._now_ms()
         with self._lock:
             self.subscribed_symbols.add(symbol)
+            self.timestamps["public_symbol_subscribed_at"][symbol] = now_ms
 
     def remove_subscribed_symbol(self, symbol: str) -> None:
         with self._lock:
             self.subscribed_symbols.discard(symbol)
             self.market_prices.pop(symbol, None)
             self.timestamps["public_price_by_symbol"].pop(symbol, None)
+            self.timestamps["public_symbol_subscribed_at"].pop(symbol, None)
 
             if symbol in self.positions:
                 self.positions[symbol]["live_market_price"] = None
@@ -290,6 +294,10 @@ class SupportState:
             for symbol in list(self.timestamps["public_price_by_symbol"].keys()):
                 if symbol not in valid_symbols:
                     self.timestamps["public_price_by_symbol"].pop(symbol, None)
+
+            for symbol in list(self.timestamps["public_symbol_subscribed_at"].keys()):
+                if symbol not in valid_symbols:
+                    self.timestamps["public_symbol_subscribed_at"].pop(symbol, None)
 
 
     def get_account_snapshot(self) -> Dict[str, Any]:
@@ -343,6 +351,7 @@ class SupportState:
         self,
         private_stale_sec: int = 30,
         public_stale_sec: int = 15,
+        public_symbol_grace_sec: int = 15,
     ) -> Dict[str, Any]:
         now_ms = self._now_ms()
         with self._lock:
@@ -352,20 +361,32 @@ class SupportState:
             private_stale = (
                 last_private is None or (now_ms - last_private) > private_stale_sec * 1000
             )
+
             tracked_public_symbols = sorted(self.subscribed_symbols)
+
+            stale_symbols: List[str] = []
+            subscribed_at_map = self.timestamps.get("public_symbol_subscribed_at", {})
+
+            for symbol in self.subscribed_symbols:
+                ts = self.timestamps["public_price_by_symbol"].get(symbol)
+                subscribed_at = subscribed_at_map.get(symbol)
+
+                # Grace period for first public tick after subscribe
+                if ts is None:
+                    if subscribed_at is None:
+                        continue
+                    if (now_ms - subscribed_at) <= public_symbol_grace_sec * 1000:
+                        continue
+                    stale_symbols.append(symbol)
+                    continue
+
+                if (now_ms - ts) > public_stale_sec * 1000:
+                    stale_symbols.append(symbol)
 
             if not tracked_public_symbols:
                 public_stale = False
             else:
-                public_stale = (
-                    last_public is None or (now_ms - last_public) > public_stale_sec * 1000
-                )   
-
-            stale_symbols: List[str] = []
-            for symbol in self.subscribed_symbols:
-                ts = self.timestamps["public_price_by_symbol"].get(symbol)
-                if ts is None or (now_ms - ts) > public_stale_sec * 1000:
-                    stale_symbols.append(symbol)
+                public_stale = len(stale_symbols) > 0
 
             return {
                 "environment": self.environment,
