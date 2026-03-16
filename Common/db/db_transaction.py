@@ -15,19 +15,39 @@ def run_in_transaction(
     operation: Callable[[MySQLConnection], T],
 ) -> T:
     """
-    Open one DB connection with autocommit disabled, execute operation,
-    commit on success, rollback on failure.
+    Execute DB operation inside explicit transaction.
+
+    Usage example:
+
+        def op(conn):
+            cursor = conn.cursor(dictionary=True)
+            cursor.execute(...)
+            cursor.execute(...)
+            return result
+
+        run_in_transaction("api_mysql_main.txt", op)
+
+    Behavior:
+    - opens new connection
+    - disables autocommit
+    - commits on success
+    - rollbacks on error
+    - supports deadlock retry
     """
+
     def _wrapped() -> T:
         conn = create_connection(api_file_name)
+
         try:
             conn.autocommit = False
             result = operation(conn)
             conn.commit()
             return result
+
         except Exception:
             conn.rollback()
             raise
+
         finally:
             conn.close()
 
