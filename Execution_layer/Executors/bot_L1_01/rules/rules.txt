@@ -1,0 +1,6 @@
+level_180=level_1
+
+z_exit=6
+
+test_total_exposure=1000
+test_leverage=2
