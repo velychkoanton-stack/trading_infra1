@@ -107,6 +107,29 @@ class ExecutorBase:
 
         side_1, side_2 = self.get_entry_sides(z)
 
+                # temporary in-memory duplicate guard
+        if self.shared_state.get_open_pair(candidate.uuid) is not None:
+            self.logger.warning(
+                "uuid=%s already exists in shared_state, skipping open",
+                candidate.uuid,
+            )
+            return None
+
+        # real DB asset lock
+        locked = self.repositories.try_lock_pair_assets(
+            bot_id=self.bot_config.bot_id,
+            uuid=candidate.uuid,
+            asset_1=candidate.asset_1,
+            asset_2=candidate.asset_2,
+        )
+
+        if not locked:
+            self.logger.info(
+                "uuid=%s assets already locked, skipping open",
+                candidate.uuid,
+            )
+            return None
+
         # first version sizing: placeholder simple structure
         # real sizing logic will be improved later
         last_price_1 = 1.0
@@ -160,6 +183,11 @@ class ExecutorBase:
                 candidate.uuid,
                 self.worker_id,
                 result.message,
+            )
+
+            self.repositories.delete_asset_locks(
+                bot_id=self.bot_config.bot_id,
+                uuid=candidate.uuid,
             )
             return None
 
@@ -246,6 +274,11 @@ class ExecutorBase:
                 record.uuid,
                 self.worker_id,
                 result.message,
+            )
+
+            self.repositories.delete_asset_locks(
+                bot_id=self.bot_config.bot_id,
+                uuid=record.uuid,
             )
 
         self.shared_state.remove_open_pair(record.uuid)

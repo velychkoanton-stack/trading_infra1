@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from contextlib import closing
 from datetime import date, datetime
 from pathlib import Path
 from typing import Optional
 
 from Common.db.db_execute import execute, fetch_all, fetch_one
+from Common.db.db_transaction import run_in_transaction
 from Common.utils.sql_file_loader import load_sql_file
 
 from Execution_layer.Executors.models import CandidatePair
@@ -71,6 +73,65 @@ class ExecutorRepositories:
     # -------------------------------------------------
     # ASSET LOCKS
     # -------------------------------------------------
+
+    def try_lock_pair_assets(
+        self,
+        bot_id: str,
+        uuid: str,
+        asset_1: str,
+        asset_2: str,
+    ) -> bool:
+        """
+        Atomically lock both assets for one pair.
+
+        Returns:
+        - True if both assets were successfully locked
+        - False if one or both assets are already locked
+        """
+
+        def _operation(conn) -> bool:
+            with closing(conn.cursor(dictionary=True)) as cursor:
+                # Re-check inside transaction
+                cursor.execute(
+                    """
+                    SELECT asset
+                    FROM asset_locks
+                    WHERE asset IN (%s, %s)
+                    LIMIT 1
+                    """,
+                    (asset_1, asset_2),
+                )
+                existing = cursor.fetchone()
+
+                if existing is not None:
+                    return False
+
+                cursor.execute(
+                    self.sql_insert_asset_lock,
+                    {
+                        "bot_id": bot_id,
+                        "uuid": uuid,
+                        "asset": asset_1,
+                    },
+                )
+
+                cursor.execute(
+                    self.sql_insert_asset_lock,
+                    {
+                        "bot_id": bot_id,
+                        "uuid": uuid,
+                        "asset": asset_2,
+                    },
+                )
+
+                return True
+
+        return run_in_transaction(
+            api_file_name=self.api_file_name,
+            operation=_operation,
+        )
+
+
 
     def insert_asset_lock(self, bot_id: str, uuid: str, asset: str) -> int:
         return execute(
