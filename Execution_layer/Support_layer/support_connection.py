@@ -473,7 +473,12 @@ class SupportConnection:
 
                 tracked_symbols = health.get("tracked_public_symbols", [])
 
-                if health["private_stream_stale"] or (tracked_symbols and health["public_stream_stale"]):
+                stale_symbols = health.get("stale_symbols", [])
+
+                all_public_symbols_satle = (
+                    bool(tracked_symbols) and len(stale_symbols) == len(tracked_symbols)
+                )
+                if health["private_stream_stale"] or all_public_symbols_satle:
                     logger.warning(
                         "%s | watchdog detected stale stream | private=%s public=%s stale_symbols=%s",
                         self.summary_log_prefix,
