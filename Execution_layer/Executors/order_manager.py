@@ -40,21 +40,19 @@ class OrderManager:
     # -------------------------------------------------------
 
     def set_leverage_with_retry(self, symbol: str, leverage: float) -> bool:
-
         leverage = float(leverage)
 
         for attempt in range(3):
-
             try:
                 self.client.set_leverage(leverage, symbol)
                 return True
-
             except Exception as e:
-
                 self.logger.warning(
-                    f"set_leverage attempt={attempt+1} failed symbol={symbol} err={e}"
+                    "set_leverage attempt=%s failed symbol=%s err=%s",
+                    attempt + 1,
+                    symbol,
+                    e,
                 )
-
                 time.sleep(1)
 
         return False
@@ -80,23 +78,23 @@ class OrderManager:
                 side=side,
                 amount=amount,
             )
-
             return order
 
         except Exception as e:
-
             self.logger.error(
-                f"Market order failed symbol={symbol} side={side} amount={amount} err={e}"
+                "Market order failed symbol=%s side=%s amount=%s err=%s",
+                symbol,
+                side,
+                amount,
+                e,
             )
-
             return None
 
     # -------------------------------------------------------
-    # FETCH POSITION AMOUNT
+    # POSITION HELPERS
     # -------------------------------------------------------
 
     def fetch_position_amount(self, symbol: str) -> float:
-
         try:
             positions = self.client.fetch_positions([symbol])
 
@@ -105,24 +103,24 @@ class OrderManager:
 
             pos = positions[0]
             size = float(pos.get("contracts", 0) or 0.0)
-
             return abs(size)
 
         except Exception as e:
-
-            self.logger.error(f"fetch_position_amount error {symbol} {e}")
-
+            self.logger.error("fetch_position_amount error %s %s", symbol, e)
             return 0.0
+
+    def _get_reverse_side(self, side: str) -> str:
+        return "sell" if str(side).strip().lower() == "buy" else "buy"
+
+    def _is_flat_pair(self, record: OpenPairRecord) -> tuple[bool, float, float]:
+        remaining1 = self.fetch_position_amount(record.ccxt_symbol_1)
+        remaining2 = self.fetch_position_amount(record.ccxt_symbol_2)
+        is_flat = remaining1 <= 0 and remaining2 <= 0
+        return is_flat, remaining1, remaining2
 
     # -------------------------------------------------------
     # EMERGENCY FLATTEN HELPERS
     # -------------------------------------------------------
-
-    def _get_reverse_side(self, side: str) -> str:
-        side_norm = str(side).strip().lower()
-        if side_norm == "buy":
-            return "sell"
-        return "buy"
 
     def flatten_symbol_position(
         self,
@@ -133,9 +131,6 @@ class OrderManager:
     ) -> bool:
         """
         Emergency flatten for one symbol.
-
-        Tries to read current live position size from broker first.
-        Falls back to the originally intended order amount if needed.
         """
         try:
             live_amount = self.fetch_position_amount(symbol)
@@ -188,15 +183,72 @@ class OrderManager:
                 )
                 return False
 
-            self.logger.warning(
-                "emergency flatten success symbol=%s",
-                symbol,
-            )
+            self.logger.warning("emergency flatten success symbol=%s", symbol)
             return True
 
         except Exception as e:
             self.logger.exception("flatten_symbol_position failure symbol=%s err=%s", symbol, e)
             return False
+
+    def _emergency_close_remaining(self, record: OpenPairRecord) -> OrderExecutionResult:
+        """
+        Emergency flatten any remaining live legs.
+        """
+        order_ids: list[str] = []
+
+        try:
+            amount1 = self.fetch_position_amount(record.ccxt_symbol_1)
+            amount2 = self.fetch_position_amount(record.ccxt_symbol_2)
+
+            ok1 = True
+            ok2 = True
+
+            if amount1 > 0:
+                reverse1 = self._get_reverse_side(record.side_1)
+                order1 = self.place_market_order(
+                    symbol=record.ccxt_symbol_1,
+                    side=reverse1,
+                    amount=amount1,
+                    leverage=record.leverage,
+                )
+                if order1:
+                    order_ids.append(order1["id"])
+                else:
+                    ok1 = False
+
+            if amount2 > 0:
+                reverse2 = self._get_reverse_side(record.side_2)
+                order2 = self.place_market_order(
+                    symbol=record.ccxt_symbol_2,
+                    side=reverse2,
+                    amount=amount2,
+                    leverage=record.leverage,
+                )
+                if order2:
+                    order_ids.append(order2["id"])
+                else:
+                    ok2 = False
+
+            time.sleep(2.0)
+
+            is_flat, remaining1, remaining2 = self._is_flat_pair(record)
+
+            if is_flat:
+                return OrderExecutionResult(
+                    True,
+                    "pair_closed_emergency",
+                    order_ids,
+                )
+
+            return OrderExecutionResult(
+                False,
+                f"emergency_close_verify_failed remaining1={remaining1} remaining2={remaining2} leg1_ok={ok1} leg2_ok={ok2}",
+                order_ids,
+            )
+
+        except Exception as e:
+            self.logger.exception("emergency close failure")
+            return OrderExecutionResult(False, str(e), order_ids)
 
     # -------------------------------------------------------
     # OPEN PAIR
@@ -216,7 +268,6 @@ class OrderManager:
         order_ids: list[str] = []
 
         try:
-
             order1 = self.place_market_order(
                 symbol_1,
                 side_1,
@@ -284,17 +335,17 @@ class OrderManager:
             )
 
         except Exception as e:
-
             self.logger.exception("open_pair failure")
-
             return OrderExecutionResult(False, str(e), order_ids)
 
     # -------------------------------------------------------
     # CLOSE PAIR
     # -------------------------------------------------------
 
-    def close_pair(self, record: OpenPairRecord) -> OrderExecutionResult:
-
+    def _close_pair_once(self, record: OpenPairRecord) -> OrderExecutionResult:
+        """
+        One normal close attempt plus verification.
+        """
         order_ids: list[str] = []
 
         try:
@@ -302,7 +353,7 @@ class OrderManager:
             amount2 = self.fetch_position_amount(record.ccxt_symbol_2)
 
             if amount1 > 0:
-                side = "sell" if record.side_1 == "buy" else "buy"
+                side = self._get_reverse_side(record.side_1)
 
                 o = self.place_market_order(
                     record.ccxt_symbol_1,
@@ -321,7 +372,7 @@ class OrderManager:
                 order_ids.append(o["id"])
 
             if amount2 > 0:
-                side = "sell" if record.side_2 == "buy" else "buy"
+                side = self._get_reverse_side(record.side_2)
 
                 o = self.place_market_order(
                     record.ccxt_symbol_2,
@@ -339,13 +390,11 @@ class OrderManager:
 
                 order_ids.append(o["id"])
 
-            # brief settle time before verification
             time.sleep(2.0)
 
-            remaining1 = self.fetch_position_amount(record.ccxt_symbol_1)
-            remaining2 = self.fetch_position_amount(record.ccxt_symbol_2)
+            is_flat, remaining1, remaining2 = self._is_flat_pair(record)
 
-            if remaining1 > 0 or remaining2 > 0:
+            if not is_flat:
                 return OrderExecutionResult(
                     False,
                     f"close_verify_failed remaining1={remaining1} remaining2={remaining2}",
@@ -353,16 +402,75 @@ class OrderManager:
                 )
 
             return OrderExecutionResult(
-                success=True,
-                message="pair_closed",
-                order_ids=order_ids,
+                True,
+                "pair_closed",
+                order_ids,
             )
 
         except Exception as e:
-
-            self.logger.exception("close_pair failure")
-
+            self.logger.exception("close_pair_once failure")
             return OrderExecutionResult(False, str(e), order_ids)
+
+    def close_pair(self, record: OpenPairRecord) -> OrderExecutionResult:
+        """
+        Close workflow:
+        1. normal close attempts
+        2. if still not flat -> emergency close
+        """
+        all_order_ids: list[str] = []
+
+        normal_retries = int(float(self.rules.get("close_retries", 3)))
+        retry_sleep_sec = float(self.rules.get("close_retry_sleep_sec", 2))
+
+        for attempt in range(1, normal_retries + 1):
+            self.logger.warning(
+                "close_pair normal attempt=%s uuid=%s symbols=%s/%s",
+                attempt,
+                record.uuid,
+                record.ccxt_symbol_1,
+                record.ccxt_symbol_2,
+            )
+
+            result = self._close_pair_once(record)
+            all_order_ids.extend(result.order_ids)
+
+            if result.success:
+                return OrderExecutionResult(
+                    True,
+                    f"pair_closed_normal_attempt_{attempt}",
+                    all_order_ids,
+                )
+
+            self.logger.error(
+                "close_pair normal attempt failed uuid=%s attempt=%s message=%s",
+                record.uuid,
+                attempt,
+                result.message,
+            )
+
+            if attempt < normal_retries:
+                time.sleep(retry_sleep_sec)
+
+        self.logger.error(
+            "close_pair switching to EMERGENCY mode uuid=%s",
+            record.uuid,
+        )
+
+        emergency_result = self._emergency_close_remaining(record)
+        all_order_ids.extend(emergency_result.order_ids)
+
+        if emergency_result.success:
+            return OrderExecutionResult(
+                True,
+                emergency_result.message,
+                all_order_ids,
+            )
+
+        return OrderExecutionResult(
+            False,
+            emergency_result.message,
+            all_order_ids,
+        )
 
     # -------------------------------------------------------
     # REALIZED PNL
@@ -375,33 +483,24 @@ class OrderManager:
         asset2_symbol: str,
         open_dt: datetime,
     ) -> float:
-
         """
         Simplified version for first stage.
-
         Later we will port your old executor logic here.
         """
-
         try:
-
             pnl_total = 0.0
 
             for symbol in [asset1_symbol, asset2_symbol]:
-
                 history = self.client.fetch_my_trades(symbol)
 
                 for trade in history:
-
                     ts = trade["timestamp"] / 1000
 
                     if ts >= open_dt.timestamp():
-
                         pnl_total += float(trade.get("info", {}).get("closedPnl", 0))
 
             return pnl_total
 
         except Exception as e:
-
             self.logger.error(f"pnl fetch error {e}")
-
             return 0.0

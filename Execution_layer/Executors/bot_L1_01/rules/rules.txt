@@ -4,3 +4,6 @@ z_exit=6
 
 test_total_exposure=1000
 test_leverage=2
+
+close_retries=3
+close_retry_sleep_sec=2
