@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+import traceback
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -65,7 +66,26 @@ class SupportConnection:
         self._reconnect_in_progress = False
         self._last_restart_ts = 0.0
 
+        # Debug identity for this exact SupportConnection object
+        self._instance_id = str(id(self))
 
+    def _log_stack(self, title: str) -> None:
+        try:
+            stack_text = "".join(traceback.format_stack(limit=20))
+            logger.warning(
+                "%s | %s | instance_id=%s\n%s",
+                self.summary_log_prefix,
+                title,
+                self._instance_id,
+                stack_text,
+            )
+        except Exception as exc:
+            logger.warning(
+                "%s | failed to print stack | instance_id=%s err=%s",
+                self.summary_log_prefix,
+                self._instance_id,
+                exc,
+            )
 
     @staticmethod
     def _to_float(value: Any) -> Optional[float]:
@@ -119,7 +139,7 @@ class SupportConnection:
         )
         self.api_key = self.exchange.apiKey
         self.api_secret = self.exchange.secret
-        return self.exchange    
+        return self.exchange
 
     def bootstrap_rest(self) -> None:
         if self.exchange is None:
@@ -204,6 +224,14 @@ class SupportConnection:
             logger.warning("%s | positions bootstrap failed: %s", self.summary_log_prefix, exc)
 
     def start(self) -> None:
+        logger.warning(
+            "%s | START called | instance_id=%s stop_event=%s",
+            self.summary_log_prefix,
+            self._instance_id,
+            self._stop_event.is_set(),
+        )
+        self._log_stack("START CALL STACK")
+
         self.load_credentials()
         self.build_ccxt()
         self.bootstrap_rest()
@@ -213,6 +241,15 @@ class SupportConnection:
         self._start_watchdog()
 
     def stop(self) -> None:
+        logger.warning(
+            "%s | STOP called | instance_id=%s private_ws_exists=%s public_ws_exists=%s",
+            self.summary_log_prefix,
+            self._instance_id,
+            self.private_ws is not None,
+            self.public_ws is not None,
+        )
+        self._log_stack("STOP CALL STACK")
+
         self._stop_event.set()
 
         try:
@@ -227,6 +264,12 @@ class SupportConnection:
         except Exception as exc:
             logger.warning("%s | public ws exit failed: %s", self.summary_log_prefix, exc)
 
+        logger.warning(
+            "%s | STOP finished | instance_id=%s",
+            self.summary_log_prefix,
+            self._instance_id,
+        )
+
     def _start_private_ws(self) -> None:
         if not self.api_key or not self.api_secret:
             raise RuntimeError("Credentials must be loaded before starting private WS")
@@ -238,7 +281,6 @@ class SupportConnection:
             api_key=self.api_key,
             api_secret=self.api_secret,
         )
-            
 
         self.private_ws.wallet_stream(callback=self._on_wallet)
         self.private_ws.position_stream(callback=self._on_position)
@@ -451,7 +493,7 @@ class SupportConnection:
                 )
         except Exception as exc:
             logger.warning("%s | execution handler error: %s", self.summary_log_prefix, exc)
-            
+
     def _start_watchdog(self) -> None:
         self._watchdog_thread = threading.Thread(
             target=self._watchdog_loop,
@@ -459,7 +501,7 @@ class SupportConnection:
             daemon=True,
         )
         self._watchdog_thread.start()
-    
+
     def _watchdog_loop(self) -> None:
         while not self._stop_event.is_set():
             try:
@@ -474,18 +516,30 @@ class SupportConnection:
                 tracked_symbols = health.get("tracked_public_symbols", [])
                 stale_symbols = health.get("stale_symbols", [])
 
+                logger.info(
+                    "%s | watchdog heartbeat | instance_id=%s private_stale=%s public_stale=%s stale_symbols=%s tracked=%s",
+                    self.summary_log_prefix,
+                    self._instance_id,
+                    health.get("private_stream_stale"),
+                    health.get("public_stream_stale"),
+                    stale_symbols,
+                    tracked_symbols,
+                )
+
                 if health["private_stream_stale"]:
                     logger.warning(
-                        "%s | watchdog detected PRIVATE stale state only | stale_symbols=%s tracked=%s",
+                        "%s | watchdog detected PRIVATE stale state only | instance_id=%s stale_symbols=%s tracked=%s",
                         self.summary_log_prefix,
+                        self._instance_id,
                         stale_symbols,
                         tracked_symbols,
                     )
 
                 elif stale_symbols:
                     logger.warning(
-                        "%s | watchdog detected PUBLIC stale symbols only | stale_symbols=%s tracked=%s",
+                        "%s | watchdog detected PUBLIC stale symbols only | instance_id=%s stale_symbols=%s tracked=%s",
                         self.summary_log_prefix,
+                        self._instance_id,
                         stale_symbols,
                         tracked_symbols,
                     )
@@ -496,6 +550,17 @@ class SupportConnection:
             time.sleep(5.0)
 
     def _restart_streams(self) -> None:
+        logger.warning(
+            "%s | RESTART ENTER | instance_id=%s stop_event=%s reconnect_in_progress=%s private_ws_exists=%s public_ws_exists=%s",
+            self.summary_log_prefix,
+            self._instance_id,
+            self._stop_event.is_set(),
+            self._reconnect_in_progress,
+            self.private_ws is not None,
+            self.public_ws is not None,
+        )
+        self._log_stack("RESTART CALL STACK")
+
         if self._stop_event.is_set():
             return
 
@@ -511,7 +576,11 @@ class SupportConnection:
                 return
 
             self._reconnect_in_progress = True
-            logger.warning("%s | restarting support streams", self.summary_log_prefix)
+            logger.warning(
+                "%s | restarting support streams NOW | instance_id=%s",
+                self.summary_log_prefix,
+                self._instance_id,
+            )
 
             try:
                 if self.private_ws is not None and hasattr(self.private_ws, "exit"):
@@ -528,6 +597,12 @@ class SupportConnection:
             self.private_ws = None
             self.public_ws = None
 
+            logger.warning(
+                "%s | ws objects cleared before rebuild | instance_id=%s",
+                self.summary_log_prefix,
+                self._instance_id,
+            )
+
             time.sleep(3.0)
 
             self.bootstrap_rest()
@@ -538,5 +613,10 @@ class SupportConnection:
             logger.warning("%s | support streams restarted", self.summary_log_prefix)
 
         finally:
+            logger.warning(
+                "%s | RESTART EXIT | instance_id=%s",
+                self.summary_log_prefix,
+                self._instance_id,
+            )
             self._reconnect_in_progress = False
             self._reconnect_lock.release()
