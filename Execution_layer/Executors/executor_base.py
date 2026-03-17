@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 
 from Execution_layer.Executors.models import (
     CandidatePair,
@@ -102,7 +102,7 @@ class ExecutorBase:
         - skip stale signal / stale pair_state
         """
         target_level = self.rules.get("level_180", "").strip()
-        now = datetime.now()
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
 
         for candidate in candidates:
             if target_level and candidate.level_180 != target_level:
@@ -464,7 +464,7 @@ class ExecutorBase:
         record: OpenPairRecord,
         candidate_refresh: CandidatePair | None,
     ) -> CloseDecision:
-        now = datetime.now()
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
 
         scheduler_status = self.repositories.get_scheduler_status(self.worker_id)
         if scheduler_status in {"STOP", "SL_BLOCK"}:
