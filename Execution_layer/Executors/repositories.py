@@ -165,17 +165,25 @@ class ExecutorRepositories:
         pos_val: float,
         open_cond: str | None,
     ) -> int:
-        return execute(
-            sql=self.sql_insert_trade_open,
-            api_file_name=self.api_file_name,
-            params={
-                "uuid": uuid,
-                "bot_id": bot_id,
-                "pos_val": pos_val,
-                "open_cond": open_cond,
-            },
-        )
+        from Common.db.db_connect import get_connection
 
+        conn = get_connection(api_file_name=self.api_file_name)
+        try:
+            with closing(conn.cursor()) as cursor:
+                cursor.execute(
+                    self.sql_insert_trade_open,
+                    {
+                        "uuid": uuid,
+                        "bot_id": bot_id,
+                        "pos_val": pos_val,
+                        "open_cond": open_cond,
+                    },
+                )
+                conn.commit()
+                return int(cursor.lastrowid or 0)
+        finally:
+            conn.close()
+            
     def update_trade_close(
         self,
         trade_id: int,
