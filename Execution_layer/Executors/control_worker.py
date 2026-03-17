@@ -181,6 +181,40 @@ class ControlWorker:
             public_stale_sec=self.bot_config.ws_stale_close_sec,
         )
 
+        now = datetime.now().timestamp()
+
+        private_ws_started = health.get("private_ws_started")
+        public_ws_started = health.get("public_ws_started")
+        rest_bootstrap = health.get("rest_bootstrap")
+
+        startup_grace_sec = 60
+
+        def _ms_to_age_sec(ts_ms):
+            if not ts_ms:
+                return None
+            return now - (float(ts_ms) / 1000.0)
+
+        private_ws_age = _ms_to_age_sec(private_ws_started)
+        public_ws_age = _ms_to_age_sec(public_ws_started)
+        rest_age = _ms_to_age_sec(rest_bootstrap)
+
+        in_startup_grace = (
+            rest_bootstrap is None
+            or private_ws_started is None
+            or public_ws_started is None
+            or (rest_age is not None and rest_age < startup_grace_sec)
+            or (private_ws_age is not None and private_ws_age < startup_grace_sec)
+            or (public_ws_age is not None and public_ws_age < startup_grace_sec)
+        )
+
+        if in_startup_grace:
+            self.shared_state.set_ws_critical(False, comment=None)
+            self.logger.info(
+                "ControlWorker ws health in startup grace | bot_id=%s",
+                self.bot_config.bot_id,
+            )
+            return
+
         private_stale = bool(health.get("private_stream_stale", False))
         public_stale = bool(health.get("public_stream_stale", False))
 
