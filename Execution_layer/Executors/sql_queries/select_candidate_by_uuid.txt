@@ -33,6 +33,7 @@ SELECT
     p.level_180,
     p.quarantine_until,
     p.quarantine_reason,
+    p.activity_score,
     p.last_update_ts AS pair_state_last_update_ts
 
 FROM signal_table s
