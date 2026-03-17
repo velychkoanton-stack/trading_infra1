@@ -59,6 +59,7 @@ class CandidatePair:
     level_180: str
     quarantine_until: Optional[datetime]
     quarantine_reason: Optional[str]
+    activity_score: Optional[float]
     pair_state_last_update_ts: datetime
 
 
