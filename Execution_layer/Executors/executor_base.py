@@ -515,7 +515,7 @@ class ExecutorBase:
             return CloseDecision(True, "z_score_extreme")
 
         if pair_unrealized_pnl is not None and record.initial_exposure > 0:
-            pnl_pct = (pair_unrealized_pnl / record.initial_exposure) * 100.0
+            pnl_pct = (pair_unrealized_pnl / record.initial_exposure)
 
             if pnl_pct >= float(candidate_refresh.tp):
                 return CloseDecision(True, "take_profit")
