@@ -69,6 +69,18 @@ class ExecutorRepositories:
             result.append(CandidatePair(**row))
 
         return result
+    
+    def fetch_candidate_by_uuid(self, uuid: str) -> Optional[CandidatePair]:
+        row = fetch_one(
+            sql=self.sql_select_candidate_by_uuid,
+            api_file_name=self.api_file_name,
+            params=(uuid,),
+        )
+
+        if not row:
+            return None
+
+        return CandidatePair(**row)
 
     # -------------------------------------------------
     # ASSET LOCKS

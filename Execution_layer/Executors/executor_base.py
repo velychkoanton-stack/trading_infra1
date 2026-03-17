@@ -68,6 +68,16 @@ class ExecutorBase:
             )
             return
 
+        open_pairs = self.shared_state.get_open_pairs_for_bot(self.bot_config.bot_id)
+        if len(open_pairs) >= self.bot_config.executor_threads_count:
+            self.logger.info(
+                "worker_id=%s skipping new open because open_pairs=%s >= executor_threads_count=%s",
+                self.worker_id,
+                len(open_pairs),
+                self.bot_config.executor_threads_count,
+            )
+            return
+
         candidates = self.load_candidates()
 
         if not candidates:
