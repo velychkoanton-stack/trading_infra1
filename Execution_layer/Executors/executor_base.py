@@ -10,6 +10,7 @@ from Execution_layer.Executors.models import (
 )
 from Execution_layer.Executors.symbol_mapper import ccxt_symbol_to_pybit_symbol
 
+from Common.utils.telegram_sender import send_tg_message
 
 class ExecutorBase:
     """
@@ -158,6 +159,67 @@ class ExecutorBase:
             f"SL:{self._fmt(candidate.sl)}",
         ]
         return ",".join(parts)
+    
+    def send_telegram_message(self, text: str) -> None:
+        try:
+            ok = send_tg_message(
+                text=text,
+                api_file_name=self.bot_config.telegram_api_file,
+            )
+            if not ok:
+                self.logger.warning("Telegram send failed | worker_id=%s", self.worker_id)
+        except Exception as e:
+            self.logger.exception("Telegram send exception worker_id=%s err=%s", self.worker_id, e)
+
+    def build_open_tg_message(
+        self,
+        candidate: CandidatePair,
+        record: OpenPairRecord,
+    ) -> str:
+        return (
+            f"OPEN\n"
+            f"bot={self.bot_config.bot_id}\n"
+            f"worker={self.worker_id}\n"
+            f"uuid={candidate.uuid}\n"
+            f"pair={candidate.asset_1} | {candidate.asset_2}\n"
+            f"side_1={record.side_1}\n"
+            f"side_2={record.side_2}\n"
+            f"entry_z={record.entry_z_score}\n"
+            f"tp={candidate.tp}\n"
+            f"sl={candidate.sl}\n"
+            f"pos_val={record.initial_exposure}\n"
+            f"trade_res_id={record.trade_res_id}"
+        )
+
+    def build_close_tg_message(
+        self,
+        record: OpenPairRecord,
+        close_reason: str,
+        pnl: float,
+        pnl_pers: float,
+    ) -> str:
+        return (
+            f"CLOSE\n"
+            f"bot={self.bot_config.bot_id}\n"
+            f"worker={self.worker_id}\n"
+            f"uuid={record.uuid}\n"
+            f"pair={record.asset_1} | {record.asset_2}\n"
+            f"reason={close_reason}\n"
+            f"pnl={pnl}\n"
+            f"pnl_pers={pnl_pers}\n"
+            f"pos_val={record.initial_exposure}\n"
+            f"trade_res_id={record.trade_res_id}"
+        )
+
+    def send_critical_alert(self, title: str, details: str) -> None:
+        text = (
+            f"CRITICAL\n"
+            f"bot={self.bot_config.bot_id}\n"
+            f"worker={self.worker_id}\n"
+            f"title={title}\n"
+            f"details={details}"
+        )
+        self.send_telegram_message(text)
 
     # -------------------------------------------------------
     # OPEN TRADE
@@ -257,6 +319,13 @@ class ExecutorBase:
                 bot_id=self.bot_config.bot_id,
                 uuid=candidate.uuid,
             )
+
+            self.send_critical_alert(
+                title="open_failed",
+                details=f"uuid={candidate.uuid} message={result.message}",
+            )
+
+
             return None
 
         open_cond = self.build_trade_cond(candidate)
@@ -284,6 +353,12 @@ class ExecutorBase:
                 self.worker_id,
                 e,
             )
+
+            self.send_critical_alert(
+                title="trade_res_open_insert_failed",
+                details=f"uuid={candidate.uuid} err={e}",
+            )
+
             trade_res_id = 0
 
         if trade_res_id <= 0:
@@ -321,6 +396,10 @@ class ExecutorBase:
             side_2,
             sizing.total_exposure,
             trade_res_id,
+        )
+
+        self.send_telegram_message(
+            self.build_open_tg_message(candidate, record)
         )
 
         return record
@@ -382,6 +461,11 @@ class ExecutorBase:
                 self.worker_id,
                 result.message,
             )
+
+            self.send_critical_alert(
+                title="close_failed",
+                details=f"uuid={record.uuid} message={result.message}",
+            )
             return
 
         candidate_refresh = self.repositories.fetch_candidate_by_uuid(record.uuid)
@@ -423,12 +507,27 @@ class ExecutorBase:
                     record.trade_res_id,
                     e,
                 )
+
+                self.send_critical_alert(
+                    title="trade_res_close_update_failed",
+                    details=f"uuid={record.uuid} trade_res_id={record.trade_res_id} err={e}",
+                )
+
         else:
             self.logger.error(
                 "trade_res close skipped uuid=%s worker_id=%s because trade_res_id is missing/invalid",
                 record.uuid,
                 self.worker_id,
             )
+
+        self.send_telegram_message(
+            self.build_close_tg_message(
+                record=record,
+                close_reason=close_reason,
+                pnl=float(pnl),
+                pnl_pers=float(pnl_pers),
+            )
+        )
 
         deleted_locks = self.repositories.delete_asset_locks(
             bot_id=self.bot_config.bot_id,

@@ -6,6 +6,7 @@ from datetime import date, datetime
 
 from Common.db.heartbeat_writer import write_heartbeat
 from Execution_layer.Executors.models import PairLiveMetrics
+from Common.utils.telegram_sender import send_tg_message
 
 
 class ControlWorker:
