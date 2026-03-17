@@ -49,6 +49,25 @@ class ExecutorBase:
     # -------------------------------------------------------
 
     def run_cycle(self) -> None:
+        scheduler_status = self.repositories.get_scheduler_status(self.worker_id)
+
+        if scheduler_status in {"SLEEP", "STOP", "SL_BLOCK"}:
+            self.logger.info(
+                "worker_id=%s skipping new open because scheduler_status=%s",
+                self.worker_id,
+                scheduler_status,
+            )
+            return
+
+        ws_state = self.shared_state.get_ws_critical_state()
+        if bool(ws_state.get("is_critical", False)):
+            self.logger.warning(
+                "worker_id=%s skipping new open because ws_critical comment=%s",
+                self.worker_id,
+                ws_state.get("comment"),
+            )
+            return
+
         candidates = self.load_candidates()
 
         if not candidates:
@@ -159,8 +178,6 @@ class ExecutorBase:
             )
             return None
 
-        # first version sizing: placeholder simple structure
-        # real sizing logic will be improved later
         last_price_1 = 1.0
         last_price_2 = 1.0
 
@@ -174,7 +191,6 @@ class ExecutorBase:
         except Exception as e:
             self.logger.error("price fetch failed for open uuid=%s err=%s", candidate.uuid, e)
 
-            # IMPORTANT: release locks on pre-open failure
             self.repositories.delete_asset_locks(
                 bot_id=self.bot_config.bot_id,
                 uuid=candidate.uuid,
@@ -238,6 +254,12 @@ class ExecutorBase:
                     open_cond=open_cond,
                 )
             )
+            self.logger.info(
+                "trade_res open inserted uuid=%s worker_id=%s trade_res_id=%s",
+                candidate.uuid,
+                self.worker_id,
+                trade_res_id,
+            )
         except Exception as e:
             self.logger.exception(
                 "trade_res open insert failed uuid=%s worker_id=%s err=%s",
@@ -300,6 +322,14 @@ class ExecutorBase:
             pair_unrealized_pnl = None
             if pair_metrics is not None:
                 pair_unrealized_pnl = pair_metrics.unrealized_pnl
+
+            env_close_decision = self.should_close_by_environment(
+                record=record,
+                candidate_refresh=candidate_refresh,
+            )
+            if env_close_decision.should_close:
+                self.close_trade(record, env_close_decision.reason)
+                return
 
             close_decision = self.should_close_by_trade_logic(
                 record=record,
@@ -419,19 +449,47 @@ class ExecutorBase:
             return "sell", "buy"
         return "buy", "sell"
 
+    def should_close_by_environment(
+        self,
+        record: OpenPairRecord,
+        candidate_refresh: CandidatePair | None,
+    ) -> CloseDecision:
+        now = datetime.now()
+
+        scheduler_status = self.repositories.get_scheduler_status(self.worker_id)
+        if scheduler_status in {"STOP", "SL_BLOCK"}:
+            return CloseDecision(True, f"scheduler_{scheduler_status.lower()}")
+
+        if candidate_refresh is None:
+            return CloseDecision(True, "candidate_missing")
+
+        signal_age_sec = (now - candidate_refresh.signal_last_update_ts).total_seconds()
+        if signal_age_sec > self.bot_config.signal_stale_sec:
+            return CloseDecision(True, "signal_stale")
+
+        pair_state_age_sec = (now - candidate_refresh.pair_state_last_update_ts).total_seconds()
+        if pair_state_age_sec > self.bot_config.pair_state_stale_sec:
+            return CloseDecision(True, "pair_state_stale")
+
+        ws_state = self.shared_state.get_ws_critical_state()
+        if bool(ws_state.get("is_critical", False)):
+            self.logger.warning(
+                "uuid=%s worker_id=%s ws_critical detected comment=%s since=%s",
+                record.uuid,
+                self.worker_id,
+                ws_state.get("comment"),
+                ws_state.get("since"),
+            )
+            return CloseDecision(True, "ws_critical")
+
+        return CloseDecision(False, "")
+
     def should_close_by_trade_logic(
         self,
         record: OpenPairRecord,
         candidate_refresh: CandidatePair | None,
         pair_unrealized_pnl: float | None,
     ) -> CloseDecision:
-        """
-        First version:
-        - close on missing candidate refresh
-        - close on z-score cross zero
-        - close on extreme z-score
-        - close on TP / SL by pair unrealized pnl
-        """
         if candidate_refresh is None:
             return CloseDecision(True, "candidate_missing")
 
@@ -440,11 +498,9 @@ class ExecutorBase:
         if z is None:
             return CloseDecision(True, "z_score_missing")
 
-        # zero-cross logic
         if (record.entry_z_score > 0 and z <= 0) or (record.entry_z_score < 0 and z >= 0):
             return CloseDecision(True, "z_score_cross_zero")
 
-        # extreme z
         if abs(z) >= float(self.rules.get("z_exit", 6)):
             return CloseDecision(True, "z_score_extreme")
 
