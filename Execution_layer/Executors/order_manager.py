@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 import ccxt
@@ -476,6 +476,64 @@ class OrderManager:
     # REALIZED PNL
     # -------------------------------------------------------
 
+    def _sum_closed_pnl_from_positions(self, positions: list) -> float:
+        """
+        Sum parsed PnL from CCXT positions history.
+        Prefer parsed 'pnl'; fallback to raw 'info.closedPnl'.
+        """
+        total = 0.0
+
+        for p in positions or []:
+            pnl = p.get("pnl")
+
+            if pnl is None:
+                try:
+                    pnl = float(p.get("info", {}).get("closedPnl") or 0.0)
+                except Exception:
+                    pnl = 0.0
+
+            total += float(pnl or 0.0)
+
+        return total
+
+    def _fetch_positions_history_page(
+        self,
+        symbol: str,
+        since_ms: int,
+        until_ms: int,
+        limit: int = 100,
+    ) -> list:
+        """
+        Single page fetch via CCXT.
+        """
+        return self.client.fetch_positions_history(
+            [symbol],   # CCXT expects single-symbol list
+            since_ms,
+            limit,
+            {
+                "until": until_ms,
+                "subType": "linear",
+            },
+        )
+
+    def sum_closed_pnl_for_window(
+        self,
+        symbol: str,
+        since_ms: int,
+        until_ms: int,
+    ) -> float:
+        """
+        Sum closed PnL for a symbol over [since_ms, until_ms].
+        For current executor lifecycle, one page is enough.
+        """
+        positions = self._fetch_positions_history_page(
+            symbol=symbol,
+            since_ms=since_ms,
+            until_ms=until_ms,
+            limit=100,
+        )
+        return self._sum_closed_pnl_from_positions(positions)
+
     def get_total_closed_pnl_for_trade(
         self,
         trade_id: int,
@@ -484,22 +542,63 @@ class OrderManager:
         open_dt: datetime,
     ) -> float:
         """
-        Simplified version for first stage.
-        Later we will port your old executor logic here.
+        Sum realized closed PnL across both legs for this trade window.
+
+        Uses:
+        - open_dt as window start
+        - current UTC time as window end
+
+        Includes a few retries because broker history can lag slightly
+        after close execution.
         """
         try:
-            pnl_total = 0.0
+            if open_dt.tzinfo is not None:
+                since_ms = int(open_dt.astimezone(timezone.utc).timestamp() * 1000)
+            else:
+                # current project timestamps are effectively UTC-naive for this logic
+                since_ms = int(open_dt.replace(tzinfo=timezone.utc).timestamp() * 1000)
 
-            for symbol in [asset1_symbol, asset2_symbol]:
-                history = self.client.fetch_my_trades(symbol)
+            retries = 4
+            sleep_sec = 2.0
+            last_total = 0.0
 
-                for trade in history:
-                    ts = trade["timestamp"] / 1000
+            for attempt in range(1, retries + 1):
+                until_ms = int(time.time() * 1000)
 
-                    if ts >= open_dt.timestamp():
-                        pnl_total += float(trade.get("info", {}).get("closedPnl", 0))
+                pnl1 = self.sum_closed_pnl_for_window(
+                    symbol=asset1_symbol,
+                    since_ms=since_ms,
+                    until_ms=until_ms,
+                )
+                pnl2 = self.sum_closed_pnl_for_window(
+                    symbol=asset2_symbol,
+                    since_ms=since_ms,
+                    until_ms=until_ms,
+                )
 
-            return pnl_total
+                total = float(pnl1 + pnl2)
+                last_total = total
+
+                self.logger.info(
+                    "realized pnl fetch attempt=%s trade_id=%s symbols=%s/%s pnl1=%.8f pnl2=%.8f total=%.8f",
+                    attempt,
+                    trade_id,
+                    asset1_symbol,
+                    asset2_symbol,
+                    pnl1,
+                    pnl2,
+                    total,
+                )
+
+                # If history already populated, return immediately.
+                # Keep zero possible, but retry a few times first because broker history may lag.
+                if total != 0.0:
+                    return total
+
+                if attempt < retries:
+                    time.sleep(sleep_sec)
+
+            return last_total
 
         except Exception as e:
             self.logger.error(f"pnl fetch error {e}")
