@@ -1,3 +1,6 @@
+# file used for testing some parts connection
+# not a part of system
+
 from Execution_layer.Executors.models import ExecutorBotConfig
 from Execution_layer.Executors.symbol_mapper import ccxt_symbol_to_asset, ccxt_symbol_to_pybit_symbol
 from Execution_layer.Executors.shared_state import SharedExecutorState
