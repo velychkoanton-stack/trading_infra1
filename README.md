@@ -166,7 +166,7 @@ Includes:
 
 ---
 
-### Example Results (placeholder)
+### Results (on 2026-03-19 it is on testing stability mode)
 
 - Total trades: XXX  
 - Win rate: XX%  
@@ -174,7 +174,7 @@ Includes:
 - Max drawdown: XX%  
 - Return: XX%  
 
-(*Will be updated with live results*)
+(*For last up-to-date results look for dashboard link*)
 
 ---
 
