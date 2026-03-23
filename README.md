@@ -24,7 +24,8 @@ The architecture is designed to scale up to **~1000 trading pairs** while mainta
 
 Full system design (Miro):
 
-https://miro.com/app/board/uXjVGvMAis4=/?share_link_id=866065540766
+https://miro.com/app/board/uXjVGvMAis4=/?share_link_id=738051014447
+
 
 The system is split into three main layers:
 
