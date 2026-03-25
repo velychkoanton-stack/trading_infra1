@@ -118,8 +118,6 @@ class AssetWorker:
             if str(symbol).endswith("/USDT:USDT")
         )
 
-        self.logger.info("CTSI present in fetched symbols = %s", "CTSI/USDT:USDT" in listed_symbols)
-
         if not listed_symbols:
             raise RuntimeError("Bybit returned zero listed /USDT:USDT linear perpetual symbols. Sync aborted.")
 
