@@ -571,30 +571,43 @@ class PairStateWorker:
         now_utc: datetime,
         streak_required: int,
     ) -> bool:
+        """
+        Quarantine rule:
+        last N calendar days must all be losing days.
+
+        Rules:
+        - use normalized events
+        - group by close day (fallback to open day if close_dt is missing)
+        - sum pnl per calendar day
+        - check the most recent N calendar days ending today
+        - if any of those days has no trades or non-negative pnl -> no quarantine
+        """
         if not normalized_events:
             return False
 
         by_day: dict[datetime.date, float] = {}
+
         for event in normalized_events:
             close_dt = event["close_dt"] or event["open_dt"]
-            close_day = close_dt.date()
-            by_day[close_day] = by_day.get(close_day, 0.0) + float(event["pnl"])
+            day = close_dt.date()
+            by_day[day] = by_day.get(day, 0.0) + float(event["pnl"])
 
         if not by_day:
             return False
 
-        sorted_days_desc = sorted(by_day.keys(), reverse=True)
-        latest_trade_day = sorted_days_desc[0]
+        # Check strictly the last N calendar days including today
+        for i in range(streak_required):
+            check_day = now_utc.date() - timedelta(days=i)
 
-        days_since_latest_trade = (now_utc.date() - latest_trade_day).days
-        if days_since_latest_trade > self.quarantine_recent_trade_days:
-            return False
+            # No trades that day -> not a losing day
+            if check_day not in by_day:
+                return False
 
-        recent_trade_days = sorted_days_desc[:streak_required]
-        if len(recent_trade_days) < streak_required:
-            return False
+            # Non-negative summed pnl that day -> streak broken
+            if by_day[check_day] >= 0:
+                return False
 
-        return all(by_day[day] < 0 for day in recent_trade_days)
+        return True
 
     def _resolve_level_30(self, is_cointegrated: bool, metrics_30: dict[str, Any]) -> str:
         if not is_cointegrated:
