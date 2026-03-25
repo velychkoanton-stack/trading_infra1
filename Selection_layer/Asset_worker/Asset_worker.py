@@ -109,13 +109,16 @@ class AssetWorker:
         self.bybit_client = create_bybit_client(self.bybit_api_file)
 
     def sync_exchange_symbols(self) -> list[str]:
-        listed_symbols_raw = fetch_linear_perpetual_symbols(self.bybit_client)
-
+        fresh_client = create_bybit_client(self.bybit_api_file)
+        listed_symbols_raw = fetch_linear_perpetual_symbols(fresh_client)
+        
         listed_symbols = sorted(
             symbol
             for symbol in listed_symbols_raw
             if str(symbol).endswith("/USDT:USDT")
         )
+
+        self.logger.info("CTSI present in fetched symbols = %s", "CTSI/USDT:USDT" in listed_symbols)
 
         if not listed_symbols:
             raise RuntimeError("Bybit returned zero listed /USDT:USDT linear perpetual symbols. Sync aborted.")
