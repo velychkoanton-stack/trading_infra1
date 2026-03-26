@@ -1,0 +1,4 @@
+SELECT COUNT(*) AS existing_pair_count
+FROM pair_universe
+WHERE asset_1 IN ({asset_placeholders})
+  AND asset_2 IN ({asset_placeholders});

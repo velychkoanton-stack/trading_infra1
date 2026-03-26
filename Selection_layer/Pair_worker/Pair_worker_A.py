@@ -13,10 +13,12 @@ from Common.db.db_execute import execute, execute_many, fetch_all
 from Common.db.deadlock_retry import run_with_deadlock_retry
 from Common.db.heartbeat_writer import write_heartbeat
 from Common.exchange.bybit_client import create_bybit_client, fetch_ohlcv_with_retry
-from Common.parquet.parquet_reader import read_symbol_ohlcv_parquet
-from Common.parquet.parquet_updater import replace_symbol_ohlcv_parquet
 from Common.statistics.adf_test import run_adf_test_from_series
-from Common.statistics.beta_calc import build_spread_from_dfs, calculate_beta_from_dfs, normalize_beta
+from Common.statistics.beta_calc import (
+    build_spread_from_dfs,
+    calculate_beta_from_dfs,
+    normalize_beta,
+)
 from Common.statistics.half_life import calculate_half_life
 from Common.statistics.hurst import calculate_hurst_exponent
 from Common.statistics.scoring import score_stat_test
@@ -46,10 +48,24 @@ def build_pair_uuid(asset_1: str, asset_2: str) -> str:
     def base_symbol(symbol: str) -> str:
         return symbol.split("/")[0].strip().upper()
 
-    base_1 = base_symbol(asset_1)
-    base_2 = base_symbol(asset_2)
-    ordered = sorted([base_1, base_2])
+    ordered = sorted([base_symbol(asset_1), base_symbol(asset_2)])
     return f"{ordered[0]}_{ordered[1]}"
+
+
+def normalize_ohlcv_frame(df: pd.DataFrame) -> pd.DataFrame:
+    required_cols = {"ts", "open", "high", "low", "close", "volume"}
+    missing = required_cols - set(df.columns)
+    if missing:
+        raise ValueError(f"OHLCV parquet is missing columns: {sorted(missing)}")
+
+    normalized = df.copy()
+    for col in ["ts", "open", "high", "low", "close", "volume"]:
+        normalized[col] = pd.to_numeric(normalized[col], errors="coerce")
+
+    normalized = normalized.dropna(subset=["ts", "close", "volume"])
+    normalized = normalized.drop_duplicates(subset=["ts"], keep="last")
+    normalized = normalized.sort_values("ts").reset_index(drop=True)
+    return normalized
 
 
 class PairWorkerA:
@@ -62,19 +78,18 @@ class PairWorkerA:
         self.rules = self._load_rules()
 
         self.worker_name = self.rules.get("WORKER_A_NAME", "pair_worker_a")
-        self.mysql_api_file = self.rules.get("MYSQL_API_FILE", "api_mysql_main.txt")
-        self.bybit_api_file = self.rules.get("BYBIT_API_FILE", "api_bybit_main.txt")
-        self.timeframe = self.rules.get("TIMEFRAME", "5m")
-        self.target_candles = int(self.rules.get("TARGET_CANDLES", "10000"))
+        self.mysql_api_file = self.rules["MYSQL_API_FILE"]
+        self.bybit_api_file = self.rules["BYBIT_API_FILE"]
+        self.timeframe = self.rules.get("TIMEFRAME", "1h")
+        self.target_candles = int(self.rules.get("TARGET_CANDLES", "1000"))
         self.scheduler_sleep_check_sec = int(self.rules.get("SCHEDULER_SLEEP_CHECK_SEC", "300"))
-
-        self.target_working_pairs = int(self.rules.get("TARGET_WORKING_PAIRS", "1000"))
-        self.target_candidate_buffer = int(self.rules.get("TARGET_CANDIDATE_BUFFER", "1200"))
-        self.max_bt_pending_queue = int(self.rules.get("MAX_BT_PENDING_QUEUE", "10"))
-        self.max_new_pairs_per_run = int(self.rules.get("MAX_NEW_PAIRS_PER_RUN", "300"))
-        self.max_stat_tests_per_run = int(self.rules.get("MAX_STAT_TESTS_PER_RUN", "300"))
-        self.pair_retention_days_forbidden_fail = int(
-            self.rules.get("PAIR_RETENTION_DAYS_FORBIDDEN_FAIL", "30")
+        self.pair_batch_insert_size = int(self.rules.get("PAIR_BATCH_INSERT_SIZE", "500"))
+        self.stat_batch_size = int(self.rules.get("STAT_BATCH_SIZE", "50"))
+        self.allow_stat_retry = str_to_bool(self.rules.get("ALLOW_STAT_RETRY", "true"))
+        self.stat_retry_cooldown_hours = int(self.rules.get("STAT_RETRY_COOLDOWN_HOURS", "24"))
+        self.selection_parquet_dir = self.project_root / self.rules.get(
+            "SELECTION_PARQUET_DIR",
+            "data/parquet_db_select",
         )
 
         log_file = self.project_root / self.rules.get("LOG_FILE_A", "data/logs/pair_worker_a.log")
@@ -90,17 +105,17 @@ class PairWorkerA:
         self.sql_mark_invalid_pairs_removed = load_sql_file(
             self.sql_dir / "mark_invalid_pairs_removed.txt"
         )
-        self.sql_select_asset_pool_primary = load_sql_file(
-            self.sql_dir / "select_asset_pool_primary.txt"
+        self.sql_select_reliable_assets = load_sql_file(
+            self.sql_dir / "select_reliable_assets_for_pair_creation.txt"
         )
-        self.sql_select_asset_pool_fallback = load_sql_file(
-            self.sql_dir / "select_asset_pool_fallback.txt"
+        self.sql_count_existing_pairs = load_sql_file(
+            self.sql_dir / "count_existing_pairs_for_reliable_assets.txt"
         )
         self.sql_insert_new_pairs_ignore = load_sql_file(
             self.sql_dir / "insert_new_pairs_ignore.txt"
         )
-        self.sql_select_pairs_for_stat_test = load_sql_file(
-            self.sql_dir / "select_pairs_for_stat_test.txt"
+        self.sql_select_pairs_for_stat_test_global = load_sql_file(
+            self.sql_dir / "select_pairs_for_stat_test_global.txt"
         )
         self.sql_update_pair_stat_state_running = load_sql_file(
             self.sql_dir / "update_pair_stat_state_running.txt"
@@ -117,21 +132,19 @@ class PairWorkerA:
 
     def reload_rules_for_loop(self) -> None:
         self.rules = self._load_rules()
-
         self.worker_name = self.rules.get("WORKER_A_NAME", "pair_worker_a")
-        self.mysql_api_file = self.rules.get("MYSQL_API_FILE", "api_mysql_main.txt")
-        self.bybit_api_file = self.rules.get("BYBIT_API_FILE", "api_bybit_main.txt")
-        self.timeframe = self.rules.get("TIMEFRAME", "5m")
-        self.target_candles = int(self.rules.get("TARGET_CANDLES", "10000"))
+        self.mysql_api_file = self.rules["MYSQL_API_FILE"]
+        self.bybit_api_file = self.rules["BYBIT_API_FILE"]
+        self.timeframe = self.rules.get("TIMEFRAME", "1h")
+        self.target_candles = int(self.rules.get("TARGET_CANDLES", "1000"))
         self.scheduler_sleep_check_sec = int(self.rules.get("SCHEDULER_SLEEP_CHECK_SEC", "300"))
-
-        self.target_working_pairs = int(self.rules.get("TARGET_WORKING_PAIRS", "1000"))
-        self.target_candidate_buffer = int(self.rules.get("TARGET_CANDIDATE_BUFFER", "1200"))
-        self.max_bt_pending_queue = int(self.rules.get("MAX_BT_PENDING_QUEUE", "10"))
-        self.max_new_pairs_per_run = int(self.rules.get("MAX_NEW_PAIRS_PER_RUN", "300"))
-        self.max_stat_tests_per_run = int(self.rules.get("MAX_STAT_TESTS_PER_RUN", "300"))
-        self.pair_retention_days_forbidden_fail = int(
-            self.rules.get("PAIR_RETENTION_DAYS_FORBIDDEN_FAIL", "30")
+        self.pair_batch_insert_size = int(self.rules.get("PAIR_BATCH_INSERT_SIZE", "500"))
+        self.stat_batch_size = int(self.rules.get("STAT_BATCH_SIZE", "50"))
+        self.allow_stat_retry = str_to_bool(self.rules.get("ALLOW_STAT_RETRY", "true"))
+        self.stat_retry_cooldown_hours = int(self.rules.get("STAT_RETRY_COOLDOWN_HOURS", "24"))
+        self.selection_parquet_dir = self.project_root / self.rules.get(
+            "SELECTION_PARQUET_DIR",
+            "data/parquet_db_select",
         )
 
     def _execute(self, sql: str, params: Any | None = None) -> Any:
@@ -151,6 +164,22 @@ class PairWorkerA:
                 params_seq=params_seq,
             )
         )
+
+    def _safe_write_heartbeat(self, runtime_status: str, comment: str | None) -> None:
+        try:
+            write_heartbeat(
+                worker_id=self.worker_name,
+                runtime_status=runtime_status,
+                comment=self._truncate_comment(comment),
+                api_file_name=self.mysql_api_file,
+            )
+        except Exception:
+            self.logger.exception(
+                "Failed to write heartbeat | worker=%s | runtime_status=%s | comment=%s",
+                self.worker_name,
+                runtime_status,
+                comment,
+            )
 
     def _get_effective_control_status(self) -> tuple[str, str]:
         rows = fetch_all(
@@ -173,22 +202,6 @@ class PairWorkerA:
 
         return "RUNNING", "default_missing_scheduler_row"
 
-    def _safe_write_heartbeat(self, runtime_status: str, comment: str | None) -> None:
-        try:
-            write_heartbeat(
-                worker_id=self.worker_name,
-                runtime_status=runtime_status,
-                comment=self._truncate_comment(comment),
-                api_file_name=self.mysql_api_file,
-            )
-        except Exception:
-            self.logger.exception(
-                "Failed to write heartbeat | worker=%s | runtime_status=%s | comment=%s",
-                self.worker_name,
-                runtime_status,
-                comment,
-            )
-
     @staticmethod
     def _truncate_comment(comment: str | None, max_len: int = 64) -> str | None:
         if comment is None:
@@ -197,7 +210,9 @@ class PairWorkerA:
 
     def reset_old_forbidden_fail_pairs(self) -> int:
         sql = self.sql_reset_old_forbidden_fail_pairs.format(
-            pair_retention_days_forbidden_fail=self.pair_retention_days_forbidden_fail
+            pair_retention_days_forbidden_fail=int(
+                self.rules.get("PAIR_RETENTION_DAYS_FORBIDDEN_FAIL", "30")
+            )
         )
         rows_affected = self._execute(sql=sql)
         self.logger.info("Reusable pair reset pass done | rows_affected=%s", rows_affected)
@@ -213,124 +228,60 @@ class PairWorkerA:
             sql=self.sql_select_control_counts,
             api_file_name=self.mysql_api_file,
         )
-
-        if not rows:
-            return {
-                "working_count": 0,
-                "candidate_count": 0,
-                "bt_pending_count": 0,
-            }
-
-        row = rows[0]
+        row = rows[0] if rows else {}
         return {
             "working_count": int(row.get("working_count") or 0),
             "candidate_count": int(row.get("candidate_count") or 0),
             "bt_pending_count": int(row.get("bt_pending_count") or 0),
         }
 
-    def needs_supply(self, counts: dict[str, int]) -> bool:
-        if counts["working_count"] < self.target_working_pairs:
-            return True
-
-        if counts["candidate_count"] < self.target_candidate_buffer:
-            return True
-
-        if counts["bt_pending_count"] < self.max_bt_pending_queue:
-            return True
-
-        return False
-
-    def build_asset_filter_sql_parts(self) -> tuple[str, str]:
-        asset_max_adf = parse_optional_float(self.rules.get("ASSET_MAX_ADF"))
-        asset_max_pvalue = parse_optional_float(self.rules.get("ASSET_MAX_PVALUE"))
-
-        asset_adf_filter_sql = ""
-        asset_pvalue_filter_sql = ""
-
-        if asset_max_adf is not None:
-            asset_adf_filter_sql = f"AND a.adf <= {asset_max_adf}"
-
-        if asset_max_pvalue is not None:
-            asset_pvalue_filter_sql = f"AND a.p_value <= {asset_max_pvalue}"
-
-        return asset_adf_filter_sql, asset_pvalue_filter_sql
-
-    def select_asset_pool(self) -> list[dict[str, Any]]:
-        asset_adf_filter_sql, asset_pvalue_filter_sql = self.build_asset_filter_sql_parts()
-
-        max_presence = float(
-            self.rules.get(
-                "ASSET_MAX_ACTIVE_PRESENCE",
-                self.rules.get("MAX_ASSET_PRESENCE", "0.05"),
-            )
+    def select_reliable_assets(self) -> list[dict[str, Any]]:
+        rows = fetch_all(
+            sql=self.sql_select_reliable_assets,
+            api_file_name=self.mysql_api_file,
         )
 
-        sql_primary = self.sql_select_asset_pool_primary.format(
-            asset_require_non_stationary_status=int(
-                self.rules["ASSET_REQUIRE_NON_STATIONARY_STATUS"]
-            ),
-            min_liq_5m=float(self.rules["MIN_LIQ_5M"]),
-            min_liq_1h=float(self.rules["MIN_LIQ_1H"]),
-            max_asset_presence=max_presence,
-            asset_pool_size=int(self.rules["ASSET_POOL_SIZE"]),
-            asset_adf_filter_sql=asset_adf_filter_sql,
-            asset_pvalue_filter_sql=asset_pvalue_filter_sql,
+        min_liq_5m = float(self.rules.get("MIN_LIQ_5M", "0"))
+        min_liq_1h = float(self.rules.get("MIN_LIQ_1H", "0"))
+
+        filtered = [
+            row for row in rows
+            if float(row.get("liq_5min_mean") or 0.0) >= min_liq_5m
+            and float(row.get("liq_1h_mean") or 0.0) >= min_liq_1h
+        ]
+
+        self.logger.info(
+            "Reliable assets selected | raw=%s filtered=%s",
+            len(rows),
+            len(filtered),
         )
+        return filtered
 
-        rows = fetch_all(sql=sql_primary, api_file_name=self.mysql_api_file)
-
-        if len(rows) >= int(self.rules["ASSET_POOL_SIZE"]):
-            return rows
-
-        sql_fallback = self.sql_select_asset_pool_fallback.format(
-            asset_require_non_stationary_status=int(
-                self.rules["ASSET_REQUIRE_NON_STATIONARY_STATUS"]
-            ),
-            min_liq_5m=float(self.rules["MIN_LIQ_5M"]),
-            min_liq_1h=float(self.rules["MIN_LIQ_1H"]),
-            asset_pool_size=int(self.rules["ASSET_POOL_SIZE"]),
-            asset_adf_filter_sql=asset_adf_filter_sql,
-            asset_pvalue_filter_sql=asset_pvalue_filter_sql,
-        )
-
-        return fetch_all(sql=sql_fallback, api_file_name=self.mysql_api_file)
-
-    def refresh_pool_parquet_data(self, asset_pool: list[dict[str, Any]]) -> dict[str, pd.DataFrame]:
-        asset_data: dict[str, pd.DataFrame] = {}
-
-        for asset in asset_pool:
-            symbol = asset["symbol"]
-
-            try:
-                self.logger.info("Refreshing parquet for stat worker | symbol=%s", symbol)
-                rows = fetch_ohlcv_with_retry(
-                    bybit_client=self.bybit_client,
-                    symbol=symbol,
-                    timeframe=self.timeframe,
-                    limit=self.target_candles,
-                )
-                replace_symbol_ohlcv_parquet(symbol=symbol, rows=rows)
-
-                df = read_symbol_ohlcv_parquet(symbol)
-                if df is None or df.empty:
-                    self.logger.warning("Parquet refresh returned empty dataframe | symbol=%s", symbol)
-                    continue
-
-                asset_data[symbol] = df
-
-            except Exception:
-                self.logger.exception("Failed refreshing parquet | symbol=%s", symbol)
-
-        return asset_data
-
-    def create_missing_pairs(self, asset_pool: list[dict[str, Any]]) -> int:
-        if len(asset_pool) < 2:
+    def count_existing_pairs_for_assets(self, asset_symbols: list[str]) -> int:
+        if len(asset_symbols) < 2:
             return 0
 
-        pair_rows: list[tuple[Any, ...]] = []
-        asset_info = {row["symbol"]: row for row in asset_pool}
+        placeholders = ",".join(["%s"] * len(asset_symbols))
+        sql = self.sql_count_existing_pairs.format(asset_placeholders=placeholders)
+        params = tuple(asset_symbols) + tuple(asset_symbols)
 
-        for asset_a, asset_b in itertools.combinations(sorted(asset_info.keys()), 2):
+        rows = fetch_all(
+            sql=sql,
+            api_file_name=self.mysql_api_file,
+            params=params,
+        )
+        return int(rows[0]["existing_pair_count"]) if rows else 0
+
+    def create_missing_pairs_for_reliable_assets(self, assets: list[dict[str, Any]]) -> int:
+        if len(assets) < 2:
+            return 0
+
+        asset_info = {row["symbol"]: row for row in assets}
+        symbols = sorted(asset_info.keys())
+
+        pair_rows: list[tuple[Any, ...]] = []
+
+        for asset_a, asset_b in itertools.combinations(symbols, 2):
             asset_1, asset_2 = sorted([asset_a, asset_b])
 
             row_1 = asset_info[asset_1]
@@ -352,47 +303,68 @@ class PairWorkerA:
                 )
             )
 
-        if not pair_rows:
-            return 0
-
-        pair_rows = pair_rows[: self.max_new_pairs_per_run]
-        batch_size = int(self.rules.get("PAIR_BATCH_INSERT_SIZE", "500"))
         inserted_estimate = 0
-
-        for start in range(0, len(pair_rows), batch_size):
-            batch = pair_rows[start : start + batch_size]
+        for start in range(0, len(pair_rows), self.pair_batch_insert_size):
+            batch = pair_rows[start:start + self.pair_batch_insert_size]
             rows_inserted = self._execute_many(
                 sql=self.sql_insert_new_pairs_ignore,
                 params_seq=batch,
             )
             inserted_estimate += int(rows_inserted or 0)
 
+        self.logger.info(
+            "Reliable-pair creation pass done | theoretical_pairs=%s inserted_estimate=%s",
+            len(pair_rows),
+            inserted_estimate,
+        )
         return inserted_estimate
 
-    def select_pairs_for_stat_test(self, asset_symbols: list[str]) -> list[dict[str, Any]]:
-        if not asset_symbols:
-            return []
+    def _selection_parquet_file_path(self, symbol: str) -> Path:
+        safe_name = symbol.replace("/", "_").replace(":", "_")
+        return self.selection_parquet_dir / f"{safe_name}.parquet"
 
-        placeholders = ",".join(["%s"] * len(asset_symbols))
-        stat_batch_size = min(
-            int(self.rules.get("STAT_BATCH_SIZE", "50")),
-            self.max_stat_tests_per_run,
+    def _refresh_selection_parquet(self, symbol: str) -> pd.DataFrame:
+        self.logger.info("Refreshing selection parquet | symbol=%s", symbol)
+
+        rows = fetch_ohlcv_with_retry(
+            bybit_client=self.bybit_client,
+            symbol=symbol,
+            timeframe=self.timeframe,
+            limit=self.target_candles,
         )
 
-        sql = self.sql_select_pairs_for_stat_test.format(
-            asset_pool_placeholders=placeholders,
-            allow_stat_retry=1 if str_to_bool(self.rules.get("ALLOW_STAT_RETRY", "true")) else 0,
-            stat_retry_cooldown_hours=int(self.rules.get("STAT_RETRY_COOLDOWN_HOURS", "24")),
-            stat_batch_size=stat_batch_size,
+        df = pd.DataFrame(rows, columns=["ts", "open", "high", "low", "close", "volume"])
+        df = normalize_ohlcv_frame(df)
+
+        self.selection_parquet_dir.mkdir(parents=True, exist_ok=True)
+        file_path = self._selection_parquet_file_path(symbol)
+        df.to_parquet(file_path, index=False)
+
+        return df
+
+    def build_selection_symbol_cache(self, symbols: list[str]) -> dict[str, pd.DataFrame]:
+        cache: dict[str, pd.DataFrame] = {}
+
+        for symbol in sorted(set(symbols)):
+            try:
+                cache[symbol] = self._refresh_selection_parquet(symbol)
+            except Exception:
+                self.logger.exception("Failed building selection parquet cache | symbol=%s", symbol)
+
+        return cache
+
+    def select_pairs_for_stat_test(self) -> list[dict[str, Any]]:
+        sql = self.sql_select_pairs_for_stat_test_global.format(
+            allow_stat_retry=1 if self.allow_stat_retry else 0,
+            stat_retry_cooldown_hours=self.stat_retry_cooldown_hours,
+            stat_batch_size=self.stat_batch_size,
         )
 
-        params = tuple(asset_symbols) + tuple(asset_symbols)
-
-        return fetch_all(
+        rows = fetch_all(
             sql=sql,
             api_file_name=self.mysql_api_file,
-            params=params,
         )
+        return rows
 
     def _passes_optional_min(self, value: float, rule_value: str | None) -> bool:
         threshold = parse_optional_float(rule_value)
@@ -443,7 +415,7 @@ class PairWorkerA:
     def run_stat_test_for_pair(
         self,
         pair_row: dict[str, Any],
-        asset_data: dict[str, pd.DataFrame],
+        symbol_cache: dict[str, pd.DataFrame],
     ) -> bool:
         pair_id = pair_row["id"]
         asset_1 = pair_row["asset_1"]
@@ -455,11 +427,11 @@ class PairWorkerA:
         )
 
         try:
-            if asset_1 not in asset_data or asset_2 not in asset_data:
-                raise ValueError(f"Missing parquet data for pair_id={pair_id}")
+            if asset_1 not in symbol_cache or asset_2 not in symbol_cache:
+                raise ValueError(f"Missing selection parquet cache for pair_id={pair_id}")
 
-            df_1 = asset_data[asset_1]
-            df_2 = asset_data[asset_2]
+            df_1 = symbol_cache[asset_1]
+            df_2 = symbol_cache[asset_2]
 
             beta = calculate_beta_from_dfs(df_1=df_1, df_2=df_2, use_log=True)
             beta_norm = normalize_beta(beta)
@@ -470,7 +442,6 @@ class PairWorkerA:
                 beta=beta,
                 use_log=True,
             )
-
             spread_series = spread_df["spread"]
 
             adf_result = run_adf_test_from_series(
@@ -521,12 +492,10 @@ class PairWorkerA:
             )
 
             self.logger.info(
-                "Stat test done | pair_id=%s %s | %s beta=%.4f beta_norm=%.4f adf=%.4f p=%.6f hurst=%.4f hl=%.2f score=%.4f bt_state=%s",
+                "Stat test done | pair_id=%s %s | %s adf=%.4f p=%.6f hurst=%.4f hl=%.2f score=%.4f bt_state=%s",
                 pair_id,
                 asset_1,
                 asset_2,
-                float(beta),
-                float(beta_norm),
                 float(adf_result["adf"]),
                 float(adf_result["p_value"]),
                 float(hurst_value),
@@ -556,8 +525,8 @@ class PairWorkerA:
 
         reset_count = self.reset_old_forbidden_fail_pairs()
         removed_count = self.mark_invalid_pairs_removed()
-
         counts = self.fetch_control_counts()
+
         self.logger.info(
             "Control counts | working=%s candidate=%s bt_pending=%s reset=%s removed=%s",
             counts["working_count"],
@@ -567,74 +536,64 @@ class PairWorkerA:
             removed_count,
         )
 
-        if not self.needs_supply(counts):
-            self.logger.info("Supply targets already satisfied | no work needed")
+        reliable_assets = self.select_reliable_assets()
+        reliable_symbols = [row["symbol"] for row in reliable_assets]
+        reliable_count = len(reliable_symbols)
+
+        if reliable_count < 2:
+            self.logger.info("Insufficient reliable assets | count=%s", reliable_count)
             return
 
-        asset_pool = self.select_asset_pool()
-        if len(asset_pool) < 2:
-            self.logger.info("Insufficient asset pool | count=%s", len(asset_pool))
+        theoretical_pair_count = reliable_count * (reliable_count - 1) // 2
+        existing_pair_count = self.count_existing_pairs_for_assets(reliable_symbols)
+
+        self.logger.info(
+            "Reliable pair universe | assets=%s theoretical_pairs=%s existing_pairs=%s",
+            reliable_count,
+            theoretical_pair_count,
+            existing_pair_count,
+        )
+
+        if existing_pair_count < theoretical_pair_count:
+            self.create_missing_pairs_for_reliable_assets(reliable_assets)
+
+        stat_pairs = self.select_pairs_for_stat_test()
+        self.logger.info("Pairs selected for stat test | count=%s", len(stat_pairs))
+
+        if not stat_pairs:
             return
 
-        asset_symbols = [row["symbol"] for row in asset_pool]
-        self.logger.info("Selected asset pool | count=%s symbols=%s", len(asset_symbols), asset_symbols)
-
-        asset_data = self.refresh_pool_parquet_data(asset_pool)
-        available_symbols = sorted(asset_data.keys())
-
-        if len(available_symbols) < 2:
-            self.logger.info("Insufficient refreshed parquet-ready assets | count=%s", len(available_symbols))
-            cleanup_objects(asset_pool, asset_data)
-            force_gc()
-            return
-
-        parquet_asset_pool = [row for row in asset_pool if row["symbol"] in asset_data]
-        created_pairs_estimate = self.create_missing_pairs(parquet_asset_pool)
-        self.logger.info("Pair creation pass done | created_estimate=%s", created_pairs_estimate)
+        symbols_for_cache = sorted(
+            {row["asset_1"] for row in stat_pairs}.union({row["asset_2"] for row in stat_pairs})
+        )
+        symbol_cache = self.build_selection_symbol_cache(symbols_for_cache)
 
         total_stat_processed = 0
         total_stat_passed = 0
 
-        while total_stat_processed < self.max_stat_tests_per_run:
-            stat_pairs = self.select_pairs_for_stat_test(available_symbols)
-            if not stat_pairs:
-                break
-
-            self.logger.info(
-                "Pairs selected for stat test | batch_count=%s processed_so_far=%s max=%s",
-                len(stat_pairs),
-                total_stat_processed,
-                self.max_stat_tests_per_run,
-            )
-
-            for row in stat_pairs:
-                if total_stat_processed >= self.max_stat_tests_per_run:
-                    break
-
-                passed = self.run_stat_test_for_pair(row, asset_data)
-                total_stat_processed += 1
-                total_stat_passed += int(passed)
-                force_gc()
+        for row in stat_pairs:
+            passed = self.run_stat_test_for_pair(row, symbol_cache)
+            total_stat_processed += 1
+            total_stat_passed += int(passed)
+            force_gc()
 
         self.logger.info(
-            "Pair worker A cycle complete | assets=%s created_pairs_estimate=%s stat_processed=%s stat_passed=%s",
-            len(available_symbols),
-            created_pairs_estimate,
+            "Pair worker A cycle complete | reliable_assets=%s stat_processed=%s stat_passed=%s",
+            reliable_count,
             total_stat_processed,
             total_stat_passed,
         )
 
-        cleanup_objects(asset_pool, asset_data, parquet_asset_pool)
+        cleanup_objects(reliable_assets, stat_pairs, symbol_cache)
         force_gc()
 
     def run_forever(self) -> None:
         self.logger.info(
-            "Pair worker A started | target_working=%s target_candidate=%s max_bt_pending=%s max_new_pairs=%s max_stat_tests=%s",
-            self.target_working_pairs,
-            self.target_candidate_buffer,
-            self.max_bt_pending_queue,
-            self.max_new_pairs_per_run,
-            self.max_stat_tests_per_run,
+            "Pair worker A started | timeframe=%s target_candles=%s stat_batch_size=%s parquet_dir=%s",
+            self.timeframe,
+            self.target_candles,
+            self.stat_batch_size,
+            self.selection_parquet_dir,
         )
 
         while True:

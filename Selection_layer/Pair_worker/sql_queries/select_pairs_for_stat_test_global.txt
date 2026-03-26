@@ -1,0 +1,27 @@
+SELECT
+    id,
+    uuid,
+    asset_1,
+    asset_2,
+    liq_5min_mean,
+    liq_1h_mean,
+    status,
+    stat_state,
+    bt_state,
+    dt_stat_tested
+FROM pair_universe
+WHERE
+    stat_state = 'new'
+    OR (
+        stat_state = 'fail'
+        AND {allow_stat_retry} = 1
+        AND (
+            dt_stat_tested IS NULL
+            OR dt_stat_tested < NOW() - INTERVAL {stat_retry_cooldown_hours} HOUR
+        )
+    )
+ORDER BY
+    liq_1h_mean DESC,
+    dt_stat_tested ASC,
+    id ASC
+LIMIT {stat_batch_size};

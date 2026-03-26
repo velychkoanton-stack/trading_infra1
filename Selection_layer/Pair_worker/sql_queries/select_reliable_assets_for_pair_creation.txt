@@ -1,0 +1,13 @@
+SELECT
+    symbol,
+    liq_5min_mean,
+    liq_1h_mean,
+    adf,
+    p_value,
+    non_stationary_status
+FROM asset_universe
+WHERE exchange_status = 'listed'
+  AND pipe_status = 'tested'
+  AND non_stationary_status = 0
+  AND adf IS NOT NULL
+ORDER BY liq_1h_mean DESC, symbol ASC;
