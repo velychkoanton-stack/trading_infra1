@@ -18,7 +18,6 @@ from Common.exchange.bybit_client import (
     fetch_linear_perpetual_symbols,
     fetch_ohlcv_with_retry,
 )
-from Common.parquet.parquet_writer import write_symbol_ohlcv_parquet
 from Common.statistics.adf_test import run_adf_test_from_close_df
 from Common.utils.cleanup import cleanup_objects, force_gc
 from Common.utils.logger import setup_logger
@@ -41,13 +40,29 @@ def build_ohlcv_dataframe(rows: list[list[Any]]) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=["ts", "open", "high", "low", "close", "volume"])
 
 
-def compute_liquidity_metrics(df: pd.DataFrame) -> tuple[float, float]:
+def write_selection_symbol_ohlcv_parquet(project_root: Path, symbol: str, df: pd.DataFrame) -> Path:
     """
-    liq_5min_mean:
-        mean(close * volume) on last 1000 bars
+    Selection-layer own parquet cache:
+    data/parquet_db_select/<BASE>.parquet
+    """
+    safe_name = symbol.replace("/", "_").replace(":", "_")
+    parquet_dir = project_root / "data" / "parquet_db_select"
+    parquet_dir.mkdir(parents=True, exist_ok=True)
+
+    file_path = parquet_dir / f"{safe_name}.parquet"
+    df.to_parquet(file_path, index=False)
+    return file_path
+
+
+def compute_liquidity_metrics_from_1h(df: pd.DataFrame) -> tuple[float, float]:
+    """
+    Source dataframe is 1h OHLCV.
 
     liq_1h_mean:
-        resample 5m notional into 1h summed notional, then take mean
+        mean(close * volume) on 1h candles
+
+    liq_5min_mean:
+        approximate 5m notional as liq_1h_mean / 12
     """
     work_df = df.copy()
 
@@ -55,13 +70,8 @@ def compute_liquidity_metrics(df: pd.DataFrame) -> tuple[float, float]:
         work_df["volume"], errors="coerce"
     )
 
-    liq_5min_mean = float(work_df["notional"].tail(1000).mean())
-
-    work_df["dt"] = pd.to_datetime(work_df["ts"], unit="ms", utc=True)
-    work_df = work_df.set_index("dt")
-
-    hourly_notional = work_df["notional"].resample("1h").sum()
-    liq_1h_mean = float(hourly_notional.mean())
+    liq_1h_mean = float(work_df["notional"].mean())
+    liq_5min_mean = float(liq_1h_mean / 12.0)
 
     return liq_5min_mean, liq_1h_mean
 
@@ -76,13 +86,13 @@ class AssetWorker:
         self.rules = load_rules_file(self.rules_dir / "asset_rules.txt")
 
         self.batch_size = int(self.rules["BATCH_SIZE"])
-        self.timeframe = self.rules["TIMEFRAME"]
-        self.target_candles = int(self.rules["TARGET_CANDLES"])
+        self.timeframe = self.rules["TIMEFRAME"]              # now expected: 1h
+        self.target_candles = int(self.rules["TARGET_CANDLES"])  # now expected: 1000
         self.skip_fresh_recheck_days = int(self.rules["SKIP_FRESH_RECHECK_DAYS"])
         self.tested_refresh_days = int(self.rules["TESTED_REFRESH_DAYS"])
         self.adf_alpha = float(self.rules["ADF_ALPHA"])
         self.adf_use_log = str_to_bool(self.rules["ADF_USE_LOG"])
-        self.min_ohlcv_rows = int(self.rules["MIN_OHLCV_ROWS"])
+        self.min_ohlcv_rows = int(self.rules["MIN_OHLCV_ROWS"])  # now expected: 1000
         self.bybit_api_file = self.rules["BYBIT_API_FILE"]
         self.mysql_api_file = self.rules["MYSQL_API_FILE"]
 
@@ -106,16 +116,24 @@ class AssetWorker:
             self.sql_dir / "get_scheduler_statuses.txt"
         )
 
+        # worker runtime client for OHLCV fetching
         self.bybit_client = create_bybit_client(self.bybit_api_file)
 
     def sync_exchange_symbols(self) -> list[str]:
+        # important: use fresh client for exchange market sync
         fresh_client = create_bybit_client(self.bybit_api_file)
+
         listed_symbols_raw = fetch_linear_perpetual_symbols(fresh_client)
-        
+
         listed_symbols = sorted(
             symbol
             for symbol in listed_symbols_raw
             if str(symbol).endswith("/USDT:USDT")
+        )
+
+        self.logger.info(
+            "CTSI present in fetched symbols = %s",
+            "CTSI/USDT:USDT" in listed_symbols,
         )
 
         if not listed_symbols:
@@ -214,9 +232,14 @@ class AssetWorker:
             return
 
         df = build_ohlcv_dataframe(rows)
-        write_symbol_ohlcv_parquet(symbol, df)
 
-        liq_5min_mean, liq_1h_mean = compute_liquidity_metrics(df)
+        parquet_path = write_selection_symbol_ohlcv_parquet(
+            project_root=self.project_root,
+            symbol=symbol,
+            df=df,
+        )
+
+        liq_5min_mean, liq_1h_mean = compute_liquidity_metrics_from_1h(df)
 
         adf_result = run_adf_test_from_close_df(
             df=df,
@@ -235,9 +258,10 @@ class AssetWorker:
         )
 
         self.logger.info(
-            "Asset tested | symbol=%s rows=%s liq_5min_mean=%.4f liq_1h_mean=%.4f adf=%.6f p_value=%.6f non_stationary=%s",
+            "Asset tested | symbol=%s rows=%s parquet=%s liq_5min_mean=%.4f liq_1h_mean=%.4f adf=%.6f p_value=%.6f non_stationary=%s",
             symbol,
             row_count,
+            parquet_path,
             liq_5min_mean,
             liq_1h_mean,
             float(adf_result["adf"]),
