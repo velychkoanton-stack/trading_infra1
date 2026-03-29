@@ -54,7 +54,7 @@ worker.pair_worker_b.enabled=1
 worker.pair_worker_b.default_status=RUNNING
 worker.pair_worker_b.weekend_mode=RUNNING
 worker.pair_worker_b.daily_sl_pct=NONE
-worker.pair_worker_b.heartbeat_sec=300
+worker.pair_worker_b.heartbeat_sec=3600
 worker.pair_worker_b.loop_sec=300
 worker.pair_worker_b.daily_window_start=00:00
 worker.pair_worker_b.daily_window_end=04:00
@@ -88,6 +88,13 @@ worker.bot_L1_02.weekend_mode=SLEEP
 worker.bot_L1_02.daily_sl_pct=NONE
 worker.bot_L1_02.heartbeat_sec=30
 worker.bot_L1_02.loop_sec=30
+
+worker.bot_L1_03.enabled=1
+worker.bot_L1_03.default_status=RUNNING
+worker.bot_L1_03.weekend_mode=SLEEP
+worker.bot_L1_03.daily_sl_pct=NONE
+worker.bot_L1_03.heartbeat_sec=30
+worker.bot_L1_03.loop_sec=30
 
 worker.bot_L2_01.enabled=1
 worker.bot_L2_01.default_status=RUNNING
