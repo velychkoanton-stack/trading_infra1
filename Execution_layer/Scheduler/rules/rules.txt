@@ -41,7 +41,7 @@ worker.asset_worker.daily_outside_status=SLEEP
 
 worker.pair_worker_a.enabled=1
 worker.pair_worker_a.default_status=SLEEP
-worker.pair_worker_a.weekend_mode=SLEEP
+worker.pair_worker_a.weekend_mode=RUNNING
 worker.pair_worker_a.daily_sl_pct=NONE
 worker.pair_worker_a.heartbeat_sec=300
 worker.pair_worker_a.loop_sec=300
